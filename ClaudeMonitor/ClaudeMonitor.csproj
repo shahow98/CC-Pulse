@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationIcon>Assets\Icons\app.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <!-- Default publish: framework-dependent single file (~190KB) -->
+  <!-- Requires .NET 8 runtime to be installed on the target machine -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>false</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+  </PropertyGroup>
+
+  <!-- Self-contained publish profile (~155MB, no .NET runtime required) -->
+  <!-- Use: dotnet publish -r win-x64 -c Release -p:SelfContained=true -p:TrimMode=partial -->
+  <PropertyGroup Condition="'$(SelfContained)' == 'true'">
+    <TrimMode>partial</TrimMode>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <NoWarn>IL2104;IL2057;IL2075;IL2072;IL2067;IL2055;IL2091;IL3050</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\Icons\green.ico" />
+    <EmbeddedResource Include="Assets\Icons\yellow.ico" />
+    <EmbeddedResource Include="Assets\Icons\red.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="Assets\Icons\green.ico" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\Icons\yellow.ico" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\Icons\red.ico" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\Icons\app.ico" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

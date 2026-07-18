@@ -1,0 +1,24 @@
+## .NET
+bin/
+obj/
+*.user
+*.suo
+*.cache
+*.log
+
+## Publish output
+publish/
+
+## IDE
+.vs/
+.vscode/
+.idea/
+
+## OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+## Trellis workspace (developer-specific)
+.trellis/workspace/
+.trellis/.developer

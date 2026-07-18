@@ -11,6 +11,11 @@
             "type": "command",
             "command": "py -3 .claude/hooks/session-start.py",
             "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "ClaudeMonitor/Hooks/cc-pulse-hook.cmd start",
+            "timeout": 5
           }
         ]
       },
@@ -21,6 +26,11 @@
             "type": "command",
             "command": "py -3 .claude/hooks/session-start.py",
             "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "ClaudeMonitor/Hooks/cc-pulse-hook.cmd start",
+            "timeout": 5
           }
         ]
       },
@@ -31,6 +41,11 @@
             "type": "command",
             "command": "py -3 .claude/hooks/session-start.py",
             "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "ClaudeMonitor/Hooks/cc-pulse-hook.cmd start",
+            "timeout": 5
           }
         ]
       }
@@ -43,6 +58,11 @@
             "type": "command",
             "command": "py -3 .claude/hooks/inject-subagent-context.py",
             "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "ClaudeMonitor/Hooks/cc-pulse-hook.cmd busy",
+            "timeout": 5
           }
         ]
       },
@@ -53,6 +73,22 @@
             "type": "command",
             "command": "py -3 .claude/hooks/inject-subagent-context.py",
             "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "ClaudeMonitor/Hooks/cc-pulse-hook.cmd busy",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ClaudeMonitor/Hooks/cc-pulse-hook.cmd idle",
+            "timeout": 5
           }
         ]
       }
@@ -64,6 +100,11 @@
             "type": "command",
             "command": "py -3 .claude/hooks/inject-workflow-state.py",
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "ClaudeMonitor/Hooks/cc-pulse-hook.cmd interactive",
+            "timeout": 5
           }
         ]
       }
