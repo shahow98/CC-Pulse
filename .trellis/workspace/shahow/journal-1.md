@@ -234,3 +234,36 @@ Created build-msi.ps1 as Windows-native replacement for build-msi.sh. Installed 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 8: MSI installer improvements: eliminate .cmd scripts, add install UI, auto-configure hooks
+
+**Date**: 2026-07-18
+**Task**: MSI installer improvements: eliminate .cmd scripts, add install UI, auto-configure hooks
+**Branch**: `master`
+
+### Summary
+
+Replaced all .cmd hook scripts with compiled C# CLI sub-commands in ClaudeMonitor.exe to avoid antivirus false positives. Added WixUI install path selection, uninstall shortcut, Claude Code pre-install check, and auto-configuration of hooks on first app launch.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `b870024` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
