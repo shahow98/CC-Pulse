@@ -137,3 +137,36 @@ Fixed CC-Pulse panel showing only one session when multiple Claude Code sessions
 ### Next Steps
 
 - None - task complete
+
+
+## Session 5: Add WiX MSI installer for CC-Pulse
+
+**Date**: 2026-07-18
+**Task**: Add WiX MSI installer for CC-Pulse
+**Branch**: `master`
+
+### Summary
+
+Created WiX v5 MSI installer with hooks configure/remove custom actions, auto-start registry entry, and Start Menu shortcut. Framework-dependent .NET 8 publish produces 116KB MSI. Uninstall flow exists but needs process-kill step for running ClaudeMonitor.exe.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `758f71a` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
