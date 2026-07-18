@@ -203,3 +203,34 @@ Fixed three MSI issues: (1) added stop-process.cmd to kill ClaudeMonitor.exe bef
 ### Next Steps
 
 - None - task complete
+
+
+## Session 7: Add PowerShell MSI build script for Windows
+
+**Date**: 2026-07-18
+**Task**: Add PowerShell MSI build script for Windows
+**Branch**: `master`
+
+### Summary
+
+Created build-msi.ps1 as Windows-native replacement for build-msi.sh. Installed WiX v5 (dotnet global tool) since WiX v7 requires OSMF license. Script auto-locates wix.exe across PATH, dotnet tools dir, and known install paths. Successfully built MSI with WiX v5.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
