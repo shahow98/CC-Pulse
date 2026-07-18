@@ -6,6 +6,9 @@ obj/
 *.cache
 *.log
 
+## Installer
+*.wixpdb
+
 ## Publish output
 publish/
 
