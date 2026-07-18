@@ -19,6 +19,11 @@ Thumbs.db
 Desktop.ini
 .DS_Store
 
-## Trellis workspace (developer-specific)
-.trellis/workspace/
+## Trellis (only ignore runtime/cache/backup, track the rest)
+.trellis/.backup-*
+.trellis/worktrees/
+.trellis/.template-hashes.json
+.trellis/.runtime/
+.trellis/.cache/
 .trellis/.developer
+.trellis/workspace/
