@@ -170,3 +170,36 @@ Created WiX v5 MSI installer with hooks configure/remove custom actions, auto-st
 ### Next Steps
 
 - None - task complete
+
+
+## Session 6: Fix MSI uninstall safety and hook preservation
+
+**Date**: 2026-07-18
+**Task**: Fix MSI uninstall safety and hook preservation
+**Branch**: `master`
+
+### Summary
+
+Fixed three MSI issues: (1) added stop-process.cmd to kill ClaudeMonitor.exe before file removal on uninstall, (2) fixed configure-hooks.cmd to append CC-Pulse hooks into existing matcher entries instead of creating duplicates, (3) fixed remove-hooks.cmd to only strip individual cc-pulse-hook entries preserving non-CC-Pulse hooks. Also fixed icon source paths in wxs (SourceDir vs PublishDir). Rebuilt MSI (120KB).
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `4dc32f6` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
