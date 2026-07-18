@@ -1,4 +1,6 @@
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <?define ProductName = "CC-Pulse" ?>
   <?define Manufacturer = "CC-Pulse" ?>
   <?define ProductVersion = "1.0.0" ?>
@@ -15,6 +17,28 @@
     <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
 
     <MediaTemplate EmbedCab="yes" />
+
+    <!-- Install UI with folder selection -->
+    <ui:WixUI Id="WixUI_InstallDir" />
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+
+    <!--
+      Pre-install check: verify Claude Code is installed.
+      Search for ~/.claude/ directory under the user's profile.
+      If not found, show a warning but allow installation to proceed
+      (user may install Claude Code later).
+    -->
+    <Property Id="CLAUDE_DIR_FOUND" Secure="yes">
+      <DirectorySearch Id="FindClaudeDir"
+                       Path="[%USERPROFILE]\.claude"
+                       Depth="0" />
+    </Property>
+
+    <!--
+      Launch condition: warn if Claude Code is not detected.
+      We don't block installation — user might install Claude Code afterwards.
+      The app will also check on first launch and prompt accordingly.
+    -->
 
     <!-- Directory structure -->
     <StandardDirectory Id="ProgramFiles6432Folder">
@@ -39,6 +63,23 @@
           Key="Software\Microsoft\Windows\CurrentVersion\Run"
           Name="$(var.ProductName)"
           Value="[INSTALLFOLDER]ClaudeMonitor.exe"
+          Type="string"
+          KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <!--
+      Store the installation folder in registry so the app can find it
+      when running as a different process (e.g., for hook configuration).
+    -->
+    <StandardDirectory Id="TARGETDIR">
+      <Component Id="InstallPathRegistry" Guid="D0E1F2A3-B4C5-6789-0ABC-DEF012345678">
+        <RegistryValue
+          Id="InstallPathReg"
+          Root="HKCU"
+          Key="Software\$(var.Manufacturer)\$(var.ProductName)"
+          Name="InstallPath"
+          Value="[INSTALLFOLDER]"
           Type="string"
           KeyPath="yes" />
       </Component>
@@ -71,28 +112,20 @@
       <Component Id="HookScript" Directory="HooksFolder" Guid="F6A7B8C9-D0E1-2345-FABC-456789012345">
         <File Id="HookSh" Source="$(var.HooksDir)cc-pulse-hook.sh" />
       </Component>
-
-      <Component Id="ConfigureHooksScript" Directory="HooksFolder" Guid="07A8B9C0-D1E2-3456-ABCD-789012345678">
-        <File Id="ConfigureHooksCmd" Source="$(var.HooksDir)configure-hooks.cmd" />
-      </Component>
-
-      <Component Id="RemoveHooksScript" Directory="HooksFolder" Guid="18B9C0D1-E2F3-4567-BCDE-890123456789">
-        <File Id="RemoveHooksCmd" Source="$(var.HooksDir)remove-hooks.cmd" />
-      </Component>
-
-      <Component Id="StopProcessScript" Directory="HooksFolder" Guid="29C0D1E2-F3A4-5678-CDEF-901234567890">
-        <File Id="StopProcessCmd" Source="$(var.HooksDir)stop-process.cmd" />
-      </Component>
     </ComponentGroup>
 
-    <!-- Start Menu shortcut -->
+    <!-- Start Menu shortcuts -->
     <DirectoryRef Id="ApplicationProgramsFolder">
-      <Component Id="ApplicationShortcut" Guid="A7B8C9D0-E1F2-3456-ABCD-567890123456">
+      <Component Id="ApplicationShortcuts" Guid="A7B8C9D0-E1F2-3456-ABCD-567890123456">
         <Shortcut Id="ApplicationStartMenuShortcut"
                   Name="$(var.ProductName)"
                   Target="[INSTALLFOLDER]ClaudeMonitor.exe"
                   WorkingDirectory="INSTALLFOLDER"
                   Icon="AppIcon" />
+        <Shortcut Id="UninstallShortcut"
+                  Name="Uninstall $(var.ProductName)"
+                  Target="[SystemFolder]msiexec.exe"
+                  Arguments="/x [ProductCode]" />
         <RemoveFolder Id="ApplicationProgramsFolder" On="uninstall" />
         <RegistryValue Root="HKCU"
                        Key="Software\$(var.Manufacturer)\$(var.ProductName)"
@@ -103,33 +136,24 @@
       </Component>
     </DirectoryRef>
 
-    <!-- Custom action: configure hooks on install -->
-    <CustomAction Id="ConfigureHooks"
-                  FileRef="ConfigureHooksCmd"
-                  ExeCommand=""
-                  Impersonate="yes"
-                  Execute="deferred"
-                  Return="ignore" />
-
     <!-- Custom action: stop running process on uninstall -->
     <CustomAction Id="StopProcess"
-                  FileRef="StopProcessCmd"
-                  ExeCommand=""
+                  FileRef="ClaudeMonitorExe"
+                  ExeCommand="stop-process"
                   Impersonate="yes"
                   Execute="deferred"
                   Return="ignore" />
 
     <!-- Custom action: remove hooks on uninstall -->
     <CustomAction Id="RemoveHooks"
-                  FileRef="RemoveHooksCmd"
-                  ExeCommand=""
+                  FileRef="ClaudeMonitorExe"
+                  ExeCommand="remove-hooks"
                   Impersonate="yes"
                   Execute="deferred"
                   Return="ignore" />
 
     <!-- Install execute sequence -->
     <InstallExecuteSequence>
-      <Custom Action="ConfigureHooks" After="InstallFiles" Condition="NOT Installed" />
       <Custom Action="StopProcess" Before="RemoveHooks" Condition="REMOVE~=&quot;ALL&quot;" />
       <Custom Action="RemoveHooks" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot;" />
     </InstallExecuteSequence>
@@ -137,8 +161,9 @@
     <!-- Feature -->
     <Feature Id="MainFeature" Title="$(var.ProductName)" Level="1">
       <ComponentGroupRef Id="ApplicationFiles" />
-      <ComponentRef Id="ApplicationShortcut" />
+      <ComponentRef Id="ApplicationShortcuts" />
       <ComponentRef Id="AutoStartComponent" />
+      <ComponentRef Id="InstallPathRegistry" />
     </Feature>
 
     <!-- App icon for Add/Remove Programs -->

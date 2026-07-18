@@ -1,4 +1,6 @@
 using System;
+using System.Diagnostics;
+using System.IO;
 using System.Windows;
 using ClaudeMonitor.Services;
 using ClaudeMonitor.UI;
@@ -8,6 +10,12 @@ namespace ClaudeMonitor;
 /// <summary>
 /// Main application class. Manages the lifecycle of all components:
 /// SessionManager, HookServer, TrayManager, and StatusWindow.
+///
+/// Also supports CLI sub-commands for hook operations (replaces .cmd scripts):
+///   ClaudeMonitor.exe hook &lt;endpoint&gt;        — send status update to HookServer
+///   ClaudeMonitor.exe configure-hooks            — add CC-Pulse hooks to settings.json
+///   ClaudeMonitor.exe remove-hooks               — remove CC-Pulse hooks from settings.json
+///   ClaudeMonitor.exe stop-process               — stop running ClaudeMonitor process
 /// </summary>
 public partial class App : System.Windows.Application
 {
@@ -16,9 +24,46 @@ public partial class App : System.Windows.Application
     private TrayManager? _trayManager;
     private StatusWindow? _statusWindow;
 
+    private static readonly string ClaudeDir = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        ".claude");
+
+    private static readonly string SettingsPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        ".claude", "settings.json");
+
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+
+        // Check for CLI sub-commands
+        if (e.Args.Length > 0)
+        {
+            HandleCliCommand(e.Args);
+            Shutdown();
+            return;
+        }
+
+        // Check if Claude Code is installed
+        if (!IsClaudeCodeInstalled())
+        {
+            var result = System.Windows.MessageBox.Show(
+                "CC-Pulse requires Claude Code to be installed, but it was not detected on this system.\n\n" +
+                "Please install Claude Code first: https://docs.anthropic.com/en/docs/claude-code\n\n" +
+                "Do you want to continue anyway?",
+                "Claude Code Not Found",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning);
+
+            if (result != MessageBoxResult.Yes)
+            {
+                Shutdown();
+                return;
+            }
+        }
+
+        // Auto-configure hooks on first launch (or if not yet configured)
+        EnsureHooksConfigured();
 
         // Initialize core services
         _sessionManager = new SessionManager();
@@ -35,6 +80,172 @@ public partial class App : System.Windows.Application
 
         // Show the status window
         _statusWindow.Show();
+    }
+
+    /// <summary>
+    /// Check whether Claude Code appears to be installed by looking for
+    /// the ~/.claude/ directory and settings.json.
+    /// </summary>
+    private static bool IsClaudeCodeInstalled()
+    {
+        // ~/.claude/ directory is the primary indicator
+        if (Directory.Exists(ClaudeDir))
+            return true;
+
+        // Also check if claude command is in PATH
+        try
+        {
+            var claudePath = FindInPath("claude.cmd") ?? FindInPath("claude.exe");
+            if (claudePath != null)
+                return true;
+        }
+        catch { /* ignore */ }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Find an executable in the system PATH.
+    /// </summary>
+    private static string? FindInPath(string name)
+    {
+        var pathEnv = Environment.GetEnvironmentVariable("PATH") ?? "";
+        var paths = pathEnv.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
+
+        foreach (var dir in paths)
+        {
+            try
+            {
+                var fullPath = Path.Combine(dir.Trim('"'), name);
+                if (File.Exists(fullPath))
+                    return fullPath;
+            }
+            catch { /* ignore invalid paths */ }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Ensure CC-Pulse hooks are configured in Claude Code settings.
+    /// Runs automatically on first launch or if hooks are missing.
+    /// </summary>
+    private static void EnsureHooksConfigured()
+    {
+        try
+        {
+            // Check if hooks are already configured
+            if (File.Exists(SettingsPath) && HookConfigurator.AreHooksConfigured())
+            {
+                return; // Already configured, nothing to do
+            }
+
+            // Get the exe path for hook commands
+            var exePath = Process.GetCurrentProcess().MainModule?.FileName
+                ?? System.Reflection.Assembly.GetExecutingAssembly().Location;
+
+            var exitCode = HookConfigurator.Configure(exePath);
+
+            if (exitCode == 0)
+            {
+                // Success — no need to bother the user
+                Debug.WriteLine("CC-Pulse hooks auto-configured successfully.");
+            }
+            else
+            {
+                System.Windows.MessageBox.Show(
+                    "CC-Pulse could not automatically configure Claude Code hooks.\n\n" +
+                    $"You can manually run: ClaudeMonitor.exe configure-hooks\n\n" +
+                    $"Or add hooks to: {SettingsPath}",
+                    "Hook Configuration Failed",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Windows.MessageBox.Show(
+                $"CC-Pulse hook auto-configuration error:\n\n{ex.Message}\n\n" +
+                $"You can manually run: ClaudeMonitor.exe configure-hooks",
+                "Hook Configuration Error",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+        }
+    }
+
+    /// <summary>
+    /// Route CLI sub-commands to their handlers.
+    /// </summary>
+    private void HandleCliCommand(string[] args)
+    {
+        var command = args[0].ToLowerInvariant();
+
+        switch (command)
+        {
+            case "hook":
+                var endpoint = args.Length > 1 ? args[1] : "idle";
+                Environment.ExitCode = HookRunner.Run(endpoint);
+                break;
+
+            case "configure-hooks":
+                var exePath = Process.GetCurrentProcess().MainModule?.FileName
+                    ?? System.Reflection.Assembly.GetExecutingAssembly().Location;
+                Environment.ExitCode = HookConfigurator.Configure(exePath);
+                break;
+
+            case "remove-hooks":
+                Environment.ExitCode = HookConfigurator.Remove();
+                break;
+
+            case "stop-process":
+                Environment.ExitCode = StopProcess();
+                break;
+
+            default:
+                Console.Error.WriteLine($"Unknown command: {command}");
+                Console.Error.WriteLine("Usage: ClaudeMonitor.exe [hook <endpoint>|configure-hooks|remove-hooks|stop-process]");
+                Environment.ExitCode = 1;
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Stop any running ClaudeMonitor process (excluding the current one).
+    /// Replaces stop-process.cmd which used taskkill.
+    /// </summary>
+    private static int StopProcess()
+    {
+        try
+        {
+            var currentId = Environment.ProcessId;
+            var processes = Process.GetProcessesByName("ClaudeMonitor")
+                .Where(p => p.Id != currentId)
+                .ToArray();
+
+            if (processes.Length == 0)
+                return 0;
+
+            foreach (var proc in processes)
+            {
+                try
+                {
+                    proc.Kill();
+                    proc.WaitForExit(3000);
+                }
+                catch { /* ignore permission/already-exited errors */ }
+                finally
+                {
+                    proc.Dispose();
+                }
+            }
+
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Failed to stop process: {ex.Message}");
+            return 1;
+        }
     }
 
     private void OnToggleWindow(object? sender, EventArgs e)
