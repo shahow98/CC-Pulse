@@ -26,4 +26,6 @@ Desktop.ini
 .trellis/.runtime/
 .trellis/.cache/
 .trellis/.developer
-.trellis/workspace/
+# .trellis/workspace/ — track journals and index, ignore temp files
+.trellis/workspace/*.tmp
+.trellis/workspace/*/*.tmp

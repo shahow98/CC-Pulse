@@ -38,3 +38,36 @@ Built the complete CC-Pulse application: WPF+WinForms hybrid desktop app with sy
 ### Next Steps
 
 - None - task complete
+
+
+## Session 2: Add bilingual README
+
+**Date**: 2026-07-18
+**Task**: Add bilingual README
+**Branch**: `master`
+
+### Summary
+
+Created README.md (English) and README.zh-CN.md (Chinese) with cross-language navigation links, covering features, architecture, build instructions, Claude Code hooks configuration, and tech stack.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `6e34f21` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
