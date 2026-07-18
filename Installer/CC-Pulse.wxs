@@ -1,0 +1,136 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <?define ProductName = "CC-Pulse" ?>
+  <?define Manufacturer = "CC-Pulse" ?>
+  <?define ProductVersion = "1.0.0" ?>
+  <?define UpgradeCode = "E3A7C1D2-5B4F-4A8E-9C2D-1F3E5A7B9C0D" ?>
+
+  <Package
+    Name="$(var.ProductName)"
+    Manufacturer="$(var.Manufacturer)"
+    Version="$(var.ProductVersion)"
+    UpgradeCode="$(var.UpgradeCode)"
+    Language="1033"
+    Compressed="yes">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Directory structure -->
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="$(var.ProductName)">
+        <Directory Id="AssetsFolder" Name="Assets">
+          <Directory Id="IconsFolder" Name="Icons" />
+        </Directory>
+        <Directory Id="HooksFolder" Name="Hooks" />
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="$(var.ProductName)" />
+    </StandardDirectory>
+
+    <!-- Autostart registry entry -->
+    <StandardDirectory Id="TARGETDIR">
+      <Component Id="AutoStartComponent" Guid="F1A2B3C4-D5E6-7890-ABCD-EF1234567890">
+        <RegistryValue
+          Id="AutoStartReg"
+          Root="HKCU"
+          Key="Software\Microsoft\Windows\CurrentVersion\Run"
+          Name="$(var.ProductName)"
+          Value="[INSTALLFOLDER]ClaudeMonitor.exe"
+          Type="string"
+          KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <!-- Application files -->
+    <ComponentGroup Id="ApplicationFiles" Directory="INSTALLFOLDER">
+      <Component Id="MainExe" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890">
+        <File Id="ClaudeMonitorExe"
+              Source="$(var.PublishDir)ClaudeMonitor.exe"
+              KeyPath="yes" />
+      </Component>
+
+      <Component Id="AssetsAppIco" Directory="IconsFolder" Guid="B2C3D4E5-F6A7-8901-BCDE-F12345678901">
+        <File Id="AppIco" Source="$(var.PublishDir)Assets\Icons\app.ico" />
+      </Component>
+
+      <Component Id="AssetsGreenIco" Directory="IconsFolder" Guid="C3D4E5F6-A7B8-9012-CDEF-123456789012">
+        <File Id="GreenIco" Source="$(var.PublishDir)Assets\Icons\green.ico" />
+      </Component>
+
+      <Component Id="AssetsYellowIco" Directory="IconsFolder" Guid="D4E5F6A7-B8C9-0123-DEFA-234567890123">
+        <File Id="YellowIco" Source="$(var.PublishDir)Assets\Icons\yellow.ico" />
+      </Component>
+
+      <Component Id="AssetsRedIco" Directory="IconsFolder" Guid="E5F6A7B8-C9D0-1234-EFAB-345678901234">
+        <File Id="RedIco" Source="$(var.PublishDir)Assets\Icons\red.ico" />
+      </Component>
+
+      <Component Id="HookScript" Directory="HooksFolder" Guid="F6A7B8C9-D0E1-2345-FABC-456789012345">
+        <File Id="HookSh" Source="$(var.HooksDir)cc-pulse-hook.sh" />
+      </Component>
+
+      <Component Id="ConfigureHooksScript" Directory="HooksFolder" Guid="07A8B9C0-D1E2-3456-ABCD-789012345678">
+        <File Id="ConfigureHooksCmd" Source="$(var.HooksDir)configure-hooks.cmd" />
+      </Component>
+
+      <Component Id="RemoveHooksScript" Directory="HooksFolder" Guid="18B9C0D1-E2F3-4567-BCDE-890123456789">
+        <File Id="RemoveHooksCmd" Source="$(var.HooksDir)remove-hooks.cmd" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- Start Menu shortcut -->
+    <DirectoryRef Id="ApplicationProgramsFolder">
+      <Component Id="ApplicationShortcut" Guid="A7B8C9D0-E1F2-3456-ABCD-567890123456">
+        <Shortcut Id="ApplicationStartMenuShortcut"
+                  Name="$(var.ProductName)"
+                  Target="[INSTALLFOLDER]ClaudeMonitor.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="AppIcon" />
+        <RemoveFolder Id="ApplicationProgramsFolder" On="uninstall" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\$(var.Manufacturer)\$(var.ProductName)"
+                       Name="installed"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- Custom action: configure hooks on install -->
+    <CustomAction Id="ConfigureHooks"
+                  FileRef="ConfigureHooksCmd"
+                  ExeCommand=""
+                  Impersonate="yes"
+                  Execute="deferred"
+                  Return="ignore" />
+
+    <!-- Custom action: remove hooks on uninstall -->
+    <CustomAction Id="RemoveHooks"
+                  FileRef="RemoveHooksCmd"
+                  ExeCommand=""
+                  Impersonate="yes"
+                  Execute="deferred"
+                  Return="ignore" />
+
+    <!-- Install execute sequence -->
+    <InstallExecuteSequence>
+      <Custom Action="ConfigureHooks" After="InstallFiles" Condition="NOT Installed" />
+      <Custom Action="RemoveHooks" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot;" />
+    </InstallExecuteSequence>
+
+    <!-- Feature -->
+    <Feature Id="MainFeature" Title="$(var.ProductName)" Level="1">
+      <ComponentGroupRef Id="ApplicationFiles" />
+      <ComponentRef Id="ApplicationShortcut" />
+      <ComponentRef Id="AutoStartComponent" />
+    </Feature>
+
+    <!-- App icon for Add/Remove Programs -->
+    <Icon Id="AppIcon" SourceFile="$(var.PublishDir)Assets\Icons\app.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+
+  </Package>
+</Wix>
