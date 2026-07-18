@@ -104,3 +104,36 @@ Fixed multiple issues with CC-Pulse hooks: (1) Replaced .cmd hook script with ba
 ### Next Steps
 
 - None - task complete
+
+
+## Session 4: Fix multi-session overwrite: read session_id from stdin JSON
+
+**Date**: 2026-07-18
+**Task**: Fix multi-session overwrite: read session_id from stdin JSON
+**Branch**: `master`
+
+### Summary
+
+Fixed CC-Pulse panel showing only one session when multiple Claude Code sessions are open. Root cause: Claude Code passes hook context via stdin JSON (with session_id and cwd fields), not via CLAUDE_SESSION_ID environment variable. All sessions were getting sessionId='unknown', causing new sessions to overwrite old ones. Updated cc-pulse-hook.sh to extract session_id and cwd from stdin JSON using pure bash (grep/sed), with env var fallback.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `f025f31` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
