@@ -18,9 +18,10 @@
 
     <MediaTemplate EmbedCab="yes" />
 
-    <!-- Install UI with folder selection -->
+    <!-- Install UI with folder selection and real EULA -->
     <ui:WixUI Id="WixUI_InstallDir" />
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
 
     <!--
       Pre-install check: verify Claude Code is installed.
@@ -91,6 +92,12 @@
         <File Id="ClaudeMonitorExe"
               Source="$(var.PublishDir)ClaudeMonitor.exe"
               KeyPath="yes" />
+      </Component>
+
+      <!-- Console-mode hook proxy for reliable stdin pipe inheritance -->
+      <Component Id="HookProxyExe" Guid="A2B3C4D5-E6F7-8901-BCDE-F23456789012">
+        <File Id="HookProxyExe"
+              Source="$(var.HookProxyPublishDir)CC-Pulse-Hook.exe" />
       </Component>
 
       <Component Id="AssetsAppIco" Directory="IconsFolder" Guid="B2C3D4E5-F6A7-8901-BCDE-F12345678901">

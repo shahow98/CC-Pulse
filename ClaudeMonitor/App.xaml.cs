@@ -129,15 +129,24 @@ public partial class App : System.Windows.Application
     /// <summary>
     /// Ensure CC-Pulse hooks are configured in Claude Code settings.
     /// Runs automatically on first launch or if hooks are missing.
+    /// Also migrates legacy shell-form hooks to exec form with the hook proxy.
     /// </summary>
     private static void EnsureHooksConfigured()
     {
         try
         {
-            // Check if hooks are already configured
-            if (File.Exists(SettingsPath) && HookConfigurator.AreHooksConfigured())
+            // Check if hooks need migration from legacy shell form to exec form
+            var needsMigration = File.Exists(SettingsPath) && HookConfigurator.AreHooksConfigured()
+                && HookConfigurator.UsesLegacyFormat();
+
+            if (needsMigration)
             {
-                return; // Already configured, nothing to do
+                // Remove old hooks and reconfigure with new format
+                HookConfigurator.Remove();
+            }
+            else if (File.Exists(SettingsPath) && HookConfigurator.AreHooksConfigured())
+            {
+                return; // Already configured with current format, nothing to do
             }
 
             // Get the exe path for hook commands

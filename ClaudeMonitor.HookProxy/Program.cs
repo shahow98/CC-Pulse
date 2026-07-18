@@ -1,17 +1,26 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 
-namespace ClaudeMonitor.Services;
+namespace ClaudeMonitor.HookProxy;
 
 /// <summary>
-/// Sends hook status updates to the CC-Pulse HookServer via HTTP.
-/// Replaces the curl-based cc-pulse-hook.cmd / cc-pulse-hook.sh scripts.
+/// Lightweight console-mode hook proxy for CC-Pulse.
+///
+/// Claude Code hooks pass session context via stdin JSON, but GUI subsystem
+/// executables (WinExe) may not properly inherit stdin pipes on Windows.
+/// This console app (Exe subsystem) reliably reads stdin and forwards
+/// the session info to the CC-Pulse HookServer via HTTP.
+///
+/// Usage: CC-Pulse-Hook.exe &lt;endpoint&gt;
+///   endpoint = start | busy | idle | interactive | end
+///
+/// Claude Code passes JSON on stdin with fields like:
+///   session_id, cwd, hook_event_name, source/reason, etc.
 /// </summary>
-public static class HookRunner
+internal static class Program
 {
     private const string HookServerUrl = "http://localhost:8765";
     private static readonly HttpClient _httpClient = new()
@@ -19,19 +28,18 @@ public static class HookRunner
         Timeout = TimeSpan.FromSeconds(2),
     };
 
-    /// <summary>
-    /// Run the hook: read stdin JSON, extract session info, POST to HookServer.
-    /// Returns immediately (fire-and-forget) to avoid blocking Claude Code.
-    /// </summary>
-    public static int Run(string endpoint)
+    static int Main(string[] args)
     {
-        if (string.IsNullOrEmpty(endpoint))
-            endpoint = "idle";
+        var endpoint = args.Length > 0 ? args[0] : "idle";
 
         try
         {
             // Read JSON from stdin (Claude Code passes hook context via stdin)
-            var input = Console.IsInputRedirected ? Console.In.ReadToEnd() : "";
+            string input = "";
+            if (Console.IsInputRedirected)
+            {
+                input = Console.In.ReadToEnd();
+            }
 
             var sessionId = "";
             var projectPath = "";

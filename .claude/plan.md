@@ -1,40 +1,75 @@
-# Plan: Fix MSI Uninstall + Hook Safety
+# Fix: CC-Pulse Hooks Not Detecting Sessions
 
-## Problem 1: Running process blocks uninstall
-If `ClaudeMonitor.exe` is running during MSI uninstall, files are locked and can't be deleted.
+## Root Cause Analysis
 
-**Fix:** Add a `stop-process.cmd` custom action that runs `taskkill /IM ClaudeMonitor.exe /F` before `RemoveFiles`.
+There are **three bugs** causing sessions to not be detected:
 
-## Problem 2: `configure-hooks.cmd` can overwrite non-CC-Pulse hooks
-Current logic: if a `matcher` already exists in an event, it skips the entire entry. But it should **append** CC-Pulse hooks into the existing entry's `hooks` array when the matcher matches, rather than creating a duplicate entry with the same matcher.
+### Bug 1: GUI Subsystem — stdin not received (PRIMARY ISSUE)
+`ClaudeMonitor.exe` is built as `WinExe` (GUI subsystem). On Windows, GUI subsystem processes **detach from the parent console**, and stdin pipes may not be properly inherited when spawned via shell form. Since `CLAUDE_SESSION_ID` is NOT available as an environment variable in hook processes (only in stdin JSON), the session ID falls back to `"unknown"`.
 
-Example scenario: user already has `PreToolUse` with `matcher: ""` containing their own hook. Current code adds a **second** entry with `matcher: ""` — Claude Code may not handle duplicate matchers well. Instead, CC-Pulse should append its hook into the existing entry.
+Evidence:
+- `file` command shows: `PE32+ executable (GUI) x86-64`
+- GitHub issues confirm `CLAUDE_SESSION_ID` is NOT exposed as env var to hooks
+- The Coding Agent Explorer (.NET) uses a separate console-mode `HookAgent.exe` for this exact reason
 
-**Fix:** Rewrite the merge logic:
-- For each CC-Pulse hook entry, search for an existing entry with the same `matcher`
-- If found AND CC-Pulse hook not already in that entry's `hooks` array → append CC-Pulse hook to that entry
-- If not found → add the entire new entry
+### Bug 2: Missing `resume` matcher for SessionStart
+The `SessionStart` hooks only configure matchers for `startup`, `clear`, and `compact`. When a session is resumed via `--resume`, `--continue`, or `/resume`, no `SessionStart` hook fires, so CC-Pulse never detects the session.
 
-## Problem 3: `remove-hooks.cmd` removes entire entries, destroying non-CC-Pulse hooks
-Current logic: if any hook in an entry contains `cc-pulse-hook`, the **entire entry** (including non-CC-Pulse hooks) is removed.
+### Bug 3: Environment variable fallback uses wrong variable name
+`HookRunner` falls back to `CLAUDE_SESSION_ID` env var, but this variable is NOT set in hook processes. `CLAUDE_CODE_SESSION_ID` is only available in Bash tool subprocesses, not in hook processes. The stdin JSON is the only reliable source.
 
-Example: `SessionStart/matcher:"startup"` has both `session-start.py` and `cc-pulse-hook.sh`. Remove deletes the whole entry, losing `session-start.py`.
+## Fix Plan
 
-**Fix:** Rewrite the removal logic:
-- For each entry, remove only the individual hooks containing `cc-pulse-hook` from the `hooks` array
-- If the entry's `hooks` array becomes empty after removal → remove the entry
-- If the event's entries array becomes empty → remove the event
-- If the `hooks` object becomes empty → remove it
+### Fix 1: Create a lightweight console-mode hook proxy (`CC-Pulse-Hook.exe`)
 
-## Files to modify
+Create a new console application project `ClaudeMonitor.HookProxy` that:
+- Is built as `Exe` (console subsystem) — properly inherits stdin
+- Reads JSON from stdin, extracts `session_id` and `cwd`
+- Falls back to `CLAUDE_SESSION_ID` / `CLAUDE_CODE_SESSION_ID` env vars
+- POSTs to `http://localhost:8765/{endpoint}` (same as HookRunner)
+- Is a minimal single-file .NET 8 console app (~few KB)
 
-1. **`ClaudeMonitor/Hooks/configure-hooks.cmd`** — Fix merge logic to append into existing entries
-2. **`ClaudeMonitor/Hooks/remove-hooks.cmd`** — Fix removal to only strip CC-Pulse hooks, not entire entries
-3. **`ClaudeMonitor/Hooks/stop-process.cmd`** — New file: `taskkill /IM ClaudeMonitor.exe /F`
-4. **`Installer/CC-Pulse.wxs`** — Add `stop-process.cmd` as installed file + custom action before `RemoveFiles`
-5. **`build-msi.sh`** — No changes needed (already includes HooksDir)
+This mirrors the Coding Agent Explorer's approach of using a separate `HookAgent.exe`.
 
-## Verification
-- Simulate configure with existing non-CC-Pulse hooks → CC-Pulse appended, not duplicated
-- Simulate remove with mixed entries → only CC-Pulse hooks stripped, others preserved
-- Rebuild MSI
+**Files to create:**
+- `ClaudeMonitor.HookProxy/Program.cs` — minimal console app
+- `ClaudeMonitor.HookProxy/ClaudeMonitor.HookProxy.csproj` — console project
+
+### Fix 2: Update HookConfigurator to use the hook proxy
+
+Change hook commands from shell form:
+```json
+"command": "\"C:/Program Files/CC-Pulse/ClaudeMonitor.exe\" hook start"
+```
+to exec form:
+```json
+"command": "C:/Program Files/CC-Pulse/CC-Pulse-Hook.exe",
+"args": ["start"]
+```
+
+Also add the `resume` matcher for `SessionStart`.
+
+**Files to modify:**
+- `ClaudeMonitor/Services/HookConfigurator.cs`
+
+### Fix 3: Update HookRunner env var fallback
+
+Add `CLAUDE_CODE_SESSION_ID` as an additional fallback in `HookRunner.cs` (for the case where the main exe is still used directly).
+
+**Files to modify:**
+- `ClaudeMonitor/Services/HookRunner.cs`
+
+### Fix 4: Update build/publish to include the hook proxy
+
+Add the hook proxy to the publish workflow and WiX installer.
+
+**Files to modify:**
+- `Installer/CC-Pulse.wxs` — add CC-Pulse-Hook.exe
+- Any publish scripts
+
+### Fix 5: Update AreHooksConfigured detection
+
+Update the hook detection to also recognize `CC-Pulse-Hook` in commands.
+
+**Files to modify:**
+- `ClaudeMonitor/Services/HookConfigurator.cs`
