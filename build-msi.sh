@@ -25,8 +25,8 @@ wix build \
   -d "PublishDir=$PUBLISH_DIR/" \
   -d "HooksDir=$HOOKS_DIR/" \
   -d "SourceDir=$SOURCE_DIR" \
-  -ext WixUIExtension \
-  -ext WixUtilExtension \
+  -ext WixToolset.UI.wixext \
+  -ext WixToolset.Util.wixext \
   -out "$MSI_OUT" \
   Installer/CC-Pulse.wxs
 

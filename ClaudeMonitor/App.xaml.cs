@@ -142,7 +142,7 @@ public partial class App : System.Windows.Application
 
             // Get the exe path for hook commands
             var exePath = Process.GetCurrentProcess().MainModule?.FileName
-                ?? System.Reflection.Assembly.GetExecutingAssembly().Location;
+                ?? Path.Combine(AppContext.BaseDirectory, "ClaudeMonitor.exe");
 
             var exitCode = HookConfigurator.Configure(exePath);
 
@@ -189,7 +189,7 @@ public partial class App : System.Windows.Application
 
             case "configure-hooks":
                 var exePath = Process.GetCurrentProcess().MainModule?.FileName
-                    ?? System.Reflection.Assembly.GetExecutingAssembly().Location;
+                    ?? Path.Combine(AppContext.BaseDirectory, "ClaudeMonitor.exe");
                 Environment.ExitCode = HookConfigurator.Configure(exePath);
                 break;
 

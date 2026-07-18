@@ -42,8 +42,8 @@ Write-Host "[2/2] Building MSI..." -ForegroundColor Yellow
   -d "PublishDir=$PublishDir\" `
   -d "HooksDir=$HooksDir\" `
   -d "SourceDir=$SourceDir" `
-  -ext WixUIExtension `
-  -ext WixUtilExtension `
+  -ext WixToolset.UI.wixext `
+  -ext WixToolset.Util.wixext `
   -out $MsiOut `
   Installer\CC-Pulse.wxs
 
