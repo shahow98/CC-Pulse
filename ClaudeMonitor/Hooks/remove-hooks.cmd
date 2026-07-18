@@ -1,5 +1,6 @@
 @echo off
 REM Remove CC-Pulse hooks from Claude Code settings on uninstall
+REM This script only removes individual CC-Pulse hook entries, preserving all other hooks
 
 setlocal enabledelayedexpansion
 
@@ -22,21 +23,27 @@ with open(settings_path, 'r', encoding='utf-8') as f:
 if 'hooks' not in settings:
     exit(0)
 
-# Remove CC-Pulse hook entries from each event
+# Remove only CC-Pulse hooks from each entry, preserving non-CC-Pulse hooks
 events_to_clean = list(settings['hooks'].keys())
 for event in events_to_clean:
     entries = settings['hooks'][event]
-    filtered = []
     for entry in entries:
-        has_cc_pulse = False
-        for hook in entry.get('hooks', []):
-            cmd = hook.get('command', '')
-            if 'cc-pulse-hook' in cmd:
-                has_cc_pulse = True
-                break
-        if not has_cc_pulse:
-            filtered.append(entry)
-    settings['hooks'][event] = filtered
+        # Remove only hooks containing 'cc-pulse-hook' from the hooks array
+        entry['hooks'] = [
+            h for h in entry.get('hooks', [])
+            if 'cc-pulse-hook' not in h.get('command', '')
+        ]
+
+    # Remove entries that now have empty hooks arrays
+    settings['hooks'][event] = [
+        e for e in entries if e.get('hooks', [])
+    ]
+
+    # Remove empty matcher key if it's empty string (clean up)
+    for entry in settings['hooks'][event]:
+        if 'matcher' in entry and entry['matcher'] == '':
+            # Keep the key for consistency, but no special handling needed
+            pass
 
 # Remove empty event arrays
 empty_events = [k for k, v in settings['hooks'].items() if not v]

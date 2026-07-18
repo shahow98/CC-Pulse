@@ -9,6 +9,7 @@ cd "$SCRIPT_DIR"
 
 PUBLISH_DIR="ClaudeMonitor/bin/Release/net8.0-windows/win-x64/publish"
 HOOKS_DIR="ClaudeMonitor/Hooks"
+SOURCE_DIR="ClaudeMonitor/"
 MSI_OUT="Installer/CC-Pulse.msi"
 
 echo "=== Building CC-Pulse MSI Installer ==="
@@ -23,6 +24,7 @@ wix build \
   -arch x64 \
   -d "PublishDir=$PUBLISH_DIR/" \
   -d "HooksDir=$HOOKS_DIR/" \
+  -d "SourceDir=$SOURCE_DIR" \
   -out "$MSI_OUT" \
   Installer/CC-Pulse.wxs
 
