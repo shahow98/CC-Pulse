@@ -14,7 +14,7 @@
           },
           {
             "type": "command",
-            "command": "ClaudeMonitor/Hooks/cc-pulse-hook.cmd start",
+            "command": "bash ClaudeMonitor/Hooks/cc-pulse-hook.sh start",
             "timeout": 5
           }
         ]
@@ -29,7 +29,7 @@
           },
           {
             "type": "command",
-            "command": "ClaudeMonitor/Hooks/cc-pulse-hook.cmd start",
+            "command": "bash ClaudeMonitor/Hooks/cc-pulse-hook.sh start",
             "timeout": 5
           }
         ]
@@ -44,7 +44,7 @@
           },
           {
             "type": "command",
-            "command": "ClaudeMonitor/Hooks/cc-pulse-hook.cmd start",
+            "command": "bash ClaudeMonitor/Hooks/cc-pulse-hook.sh start",
             "timeout": 5
           }
         ]
@@ -52,7 +52,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Task",
+        "matcher": "Task|Agent",
         "hooks": [
           {
             "type": "command",
@@ -61,22 +61,17 @@
           },
           {
             "type": "command",
-            "command": "ClaudeMonitor/Hooks/cc-pulse-hook.cmd busy",
+            "command": "bash ClaudeMonitor/Hooks/cc-pulse-hook.sh busy",
             "timeout": 5
           }
         ]
       },
       {
-        "matcher": "Agent",
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
-            "command": "py -3 .claude/hooks/inject-subagent-context.py",
-            "timeout": 30
-          },
-          {
-            "type": "command",
-            "command": "ClaudeMonitor/Hooks/cc-pulse-hook.cmd busy",
+            "command": "bash ClaudeMonitor/Hooks/cc-pulse-hook.sh busy",
             "timeout": 5
           }
         ]
@@ -87,7 +82,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ClaudeMonitor/Hooks/cc-pulse-hook.cmd idle",
+            "command": "bash ClaudeMonitor/Hooks/cc-pulse-hook.sh idle",
             "timeout": 5
           }
         ]
@@ -103,7 +98,31 @@
           },
           {
             "type": "command",
-            "command": "ClaudeMonitor/Hooks/cc-pulse-hook.cmd interactive",
+            "command": "bash ClaudeMonitor/Hooks/cc-pulse-hook.sh busy",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ClaudeMonitor/Hooks/cc-pulse-hook.sh idle",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ClaudeMonitor/Hooks/cc-pulse-hook.sh end",
             "timeout": 5
           }
         ]

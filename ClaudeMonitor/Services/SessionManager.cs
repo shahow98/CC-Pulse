@@ -76,7 +76,7 @@ public class SessionManager : IDisposable
         SessionsChanged?.Invoke(this, EventArgs.Empty);
     }
 
-    /// <summary>Update a session's status. Starts interactive timer if transitioning to Idle from Busy.</summary>
+    /// <summary>Update a session's status.</summary>
     public void UpdateStatus(string sessionId, SessionStatus newStatus)
     {
         if (!_sessions.TryGetValue(sessionId, out var session)) return;
@@ -87,18 +87,10 @@ public class SessionManager : IDisposable
         session.Status = newStatus;
         session.LastUpdated = DateTime.Now;
 
-        // Cancel any pending interactive timer
+        // Cancel any pending interactive timer when status changes
         if (_interactiveTimers.TryRemove(sessionId, out var timer))
         {
             timer.Dispose();
-        }
-
-        // When transitioning from Busy to Idle, start a timer to detect Interactive state.
-        // If the user doesn't submit a new prompt within the timeout, the session
-        // is likely waiting for user input → switch to Interactive (red).
-        if (oldStatus == SessionStatus.Busy && newStatus == SessionStatus.Idle)
-        {
-            StartInteractiveTimer(sessionId);
         }
 
         StatusChanged?.Invoke(this, new SessionStatusChangedEventArgs
