@@ -76,6 +76,17 @@
           Type="string"
           KeyPath="yes" />
       </Component>
+
+      <!-- Remove user config directory (~/.cc-pulse) on uninstall (optional, controlled by checkbox) -->
+      <Component Id="RemoveUserConfigComponent" Guid="E1A2B3C4-D5E6-7890-ABCD-F12345678901" Condition="REMOVEUSERCONFIG~=&quot;1&quot;">
+        <RegistryValue Root="HKCU"
+                       Key="Software\$(var.Manufacturer)\$(var.ProductName)"
+                       Name="UserConfigMarker"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+        <util:RemoveFolderEx On="uninstall" Property="USERCONFIGDIR" />
+      </Component>
     </StandardDirectory>
 
     <!--
@@ -169,6 +180,9 @@
       </Component>
     </StandardDirectory>
 
+    <!-- Property: whether to remove user config on uninstall (set by uninstall options dialog) -->
+    <Property Id="REMOVEUSERCONFIG" Secure="yes" />
+
     <!-- Custom action: stop running process on uninstall -->
     <CustomAction Id="StopProcess"
                   FileRef="ClaudeMonitorExe"
@@ -185,6 +199,13 @@
                   Execute="deferred"
                   Return="ignore" />
 
+    <!-- Property: path to user config directory for RemoveFolderEx -->
+    <Property Id="USERCONFIGDIR" Secure="yes">
+      <DirectorySearch Id="FindUserConfigDir"
+                       Path="[%USERPROFILE]\.cc-pulse"
+                       Depth="0" />
+    </Property>
+
     <!-- Install execute sequence -->
     <InstallExecuteSequence>
       <Custom Action="StopProcess" Before="RemoveHooks" Condition="REMOVE~=&quot;ALL&quot;" />
@@ -196,6 +217,7 @@
       <ComponentGroupRef Id="ApplicationFiles" />
       <ComponentRef Id="ApplicationShortcuts" />
       <ComponentRef Id="InstallPathRegistry" />
+      <ComponentRef Id="RemoveUserConfigComponent" />
       <Feature Id="DesktopShortcutFeature"
                Title="Desktop Shortcut"
                Description="Create a shortcut on the desktop."
@@ -220,6 +242,9 @@
       Inject an "Installation Options" dialog with checkboxes into
       the WixUI_InstallDir wizard flow:
         LicenseAgreementDlg → InstallDirDlg → InstallOptionsDlg → VerifyReadyDlg
+
+      Also add an "Uninstall Options" dialog shown during uninstall:
+        MaintenanceTypeDlg → UninstallOptionsDlg → VerifyReadyDlg
     -->
     <UI>
       <Dialog Id="InstallOptionsDlg" Width="370" Height="270" Title="$(var.ProductName) Setup">
@@ -257,6 +282,37 @@
         </Control>
       </Dialog>
 
+      <!-- Uninstall options dialog: ask whether to remove user config -->
+      <Dialog Id="UninstallOptionsDlg" Width="370" Height="270" Title="$(var.ProductName) Setup">
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="200" Height="15" Transparent="yes"
+                 Text="{\WixUI_Font_Title}Uninstall Options" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes"
+                 Text="Choose what to remove during uninstall." />
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44"
+                 Text="WixUI_Bmp_Banner" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+
+        <Control Id="RemoveUserConfigCheckbox" Type="CheckBox"
+                 X="20" Y="70" Width="330" Height="30"
+                 Property="REMOVEUSERCONFIG"
+                 CheckBoxValue="1"
+                 Text="Remove user configuration (language settings, etc. in %USERPROFILE%\.cc-pulse)" />
+
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17"
+                 Text="&amp;Back">
+          <Publish Event="NewDialog" Value="MaintenanceTypeDlg" Order="1" />
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17"
+                 Default="yes" Text="&amp;Uninstall">
+          <Publish Event="NewDialog" Value="VerifyReadyDlg" Order="1" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17"
+                 Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
       <!--
         Override the WixUI_InstallDir navigation flow to insert InstallOptionsDlg.
         In WiX v4/v5, you override a publish by providing a new one with the same
@@ -266,6 +322,16 @@
                Value="InstallOptionsDlg" Order="5" />
       <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog"
                Value="InstallOptionsDlg" Order="5" />
+
+      <!--
+        Override the uninstall flow to insert UninstallOptionsDlg.
+        When the user clicks "Remove" on MaintenanceTypeDlg, go to our options
+        dialog first, then proceed to VerifyReadyDlg.
+      -->
+      <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog"
+               Value="UninstallOptionsDlg" Order="5" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog"
+               Value="UninstallOptionsDlg" Order="6" />
     </UI>
 
   </Package>

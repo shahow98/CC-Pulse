@@ -48,10 +48,8 @@ public partial class App : System.Windows.Application
         if (!IsClaudeCodeInstalled())
         {
             var result = System.Windows.MessageBox.Show(
-                "CC-Pulse requires Claude Code to be installed, but it was not detected on this system.\n\n" +
-                "Please install Claude Code first: https://docs.anthropic.com/en/docs/claude-code\n\n" +
-                "Do you want to continue anyway?",
-                "Claude Code Not Found",
+                Lang.Get("MsgClaudeNotFoundBody"),
+                Lang.Get("MsgClaudeNotFoundTitle"),
                 MessageBoxButton.YesNo,
                 MessageBoxImage.Warning);
 
@@ -163,10 +161,8 @@ public partial class App : System.Windows.Application
             else
             {
                 System.Windows.MessageBox.Show(
-                    "CC-Pulse could not automatically configure Claude Code hooks.\n\n" +
-                    $"You can manually run: ClaudeMonitor.exe configure-hooks\n\n" +
-                    $"Or add hooks to: {SettingsPath}",
-                    "Hook Configuration Failed",
+                    Lang.Get("MsgHookConfigFailedBody", SettingsPath),
+                    Lang.Get("MsgHookConfigFailedTitle"),
                     MessageBoxButton.OK,
                     MessageBoxImage.Warning);
             }
@@ -174,9 +170,8 @@ public partial class App : System.Windows.Application
         catch (Exception ex)
         {
             System.Windows.MessageBox.Show(
-                $"CC-Pulse hook auto-configuration error:\n\n{ex.Message}\n\n" +
-                $"You can manually run: ClaudeMonitor.exe configure-hooks",
-                "Hook Configuration Error",
+                Lang.Get("MsgHookConfigErrorBody", ex.Message),
+                Lang.Get("MsgHookConfigErrorTitle"),
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
         }
@@ -273,6 +268,7 @@ public partial class App : System.Windows.Application
         _hookServer?.Dispose();
         _trayManager?.Dispose();
         _sessionManager?.Dispose();
+        AppSettings.Instance.Dispose();
 
         base.OnExit(e);
     }

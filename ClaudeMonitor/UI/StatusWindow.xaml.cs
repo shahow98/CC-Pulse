@@ -32,8 +32,14 @@ public partial class StatusWindow : Window
         _sessionManager.StatusChanged += OnStatusChanged;
         _sessionManager.SessionsChanged += OnSessionsChanged;
 
+        // Listen for language changes to refresh text
+        AppSettings.Instance.LanguageChanged += OnLanguageChanged;
+
         // Position at top-right corner of the primary screen
         PositionWindow();
+
+        // Set initial localized text
+        EmptyMessage.Text = Lang.Get("NoActiveSessions");
 
         UpdateEmptyState();
     }
@@ -136,10 +142,26 @@ public partial class StatusWindow : Window
         // Keep on top but don't steal focus aggressively
     }
 
+    private void OnLanguageChanged(object? sender, EventArgs e)
+    {
+        Dispatcher.Invoke(() =>
+        {
+            // Refresh localized text
+            EmptyMessage.Text = Lang.Get("NoActiveSessions");
+
+            // Force all session items to re-evaluate their status text
+            var snapshot = _sessions.ToList();
+            _sessions.Clear();
+            foreach (var s in snapshot)
+                _sessions.Add(s);
+        });
+    }
+
     protected override void OnClosing(CancelEventArgs e)
     {
         _sessionManager.StatusChanged -= OnStatusChanged;
         _sessionManager.SessionsChanged -= OnSessionsChanged;
+        AppSettings.Instance.LanguageChanged -= OnLanguageChanged;
         base.OnClosing(e);
     }
 }
@@ -180,13 +202,13 @@ public class StatusToTextConverter : IValueConverter
         {
             return status switch
             {
-                SessionStatus.Idle => "Idle",
-                SessionStatus.Busy => "Working…",
-                SessionStatus.Interactive => "Waiting for input",
-                _ => "Unknown"
+                SessionStatus.Idle => Lang.Get("StatusIdle"),
+                SessionStatus.Busy => Lang.Get("StatusBusy"),
+                SessionStatus.Interactive => Lang.Get("StatusInteractive"),
+                _ => Lang.Get("StatusUnknown")
             };
         }
-        return "Unknown";
+        return Lang.Get("StatusUnknown");
     }
 
     public object ConvertBack(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)

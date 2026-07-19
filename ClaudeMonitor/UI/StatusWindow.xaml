@@ -111,7 +111,6 @@
             <!-- Empty state -->
             <TextBlock Grid.Row="1"
                        x:Name="EmptyMessage"
-                       Text="No active sessions"
                        Foreground="#FF6C7086"
                        FontSize="11"
                        HorizontalAlignment="Center"
