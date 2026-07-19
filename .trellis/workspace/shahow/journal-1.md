@@ -333,3 +333,36 @@ Added language settings supporting English and Chinese (zh-CN) with persistent s
 ### Next Steps
 
 - None - task complete
+
+
+## Session 11: Remove MSI from Git and add .gitignore rule
+
+**Date**: 2026-07-19
+**Task**: Remove MSI from Git and add .gitignore rule
+**Branch**: `master`
+
+### Summary
+
+Removed Installer/CC-Pulse.msi from Git tracking, added *.msi to .gitignore, deleted duplicate root License.rtf, and merged branch to master.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `6557ecf` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
