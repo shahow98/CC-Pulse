@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 11
+- **Total Sessions**: 12
 - **Last Active**: 2026-07-19
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~368 | Active |
+| `journal-1.md` | ~402 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 12 | 2026-07-19 | Remove MSI from Git, update all READMEs | `6557ecf`, `e32863d` | `main` |
 | 11 | 2026-07-19 | Remove MSI from Git and add .gitignore rule | `6557ecf` | `master` |
 | 10 | 2026-07-19 | Add i18n language settings and uninstall config cleanup | `b41f670` | `fix/hook-stdin-and-resume-matcher` |
 | 9 | 2026-07-19 | Fix hook proxy fire-and-forget HTTP POST | `80bc659` | `fix/hook-stdin-and-resume-matcher` |

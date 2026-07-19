@@ -366,3 +366,37 @@ Removed Installer/CC-Pulse.msi from Git tracking, added *.msi to .gitignore, del
 ### Next Steps
 
 - None - task complete
+
+
+## Session 12: Remove MSI from Git, update all READMEs
+
+**Date**: 2026-07-19
+**Task**: Remove MSI from Git, update all READMEs
+**Branch**: `main`
+
+### Summary
+
+Removed MSI binary from Git tracking and added *.msi to .gitignore. Updated all three README files (EN, zh-CN, ClaudeMonitor/) to reflect current features: auto-configure hooks, bilingual UI, MSI installer, CLI commands, HookProxy, new hook events, and updated project structure.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `6557ecf` | (see git log) |
+| `e32863d` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
