@@ -2,7 +2,6 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
-using System.Threading;
 using ClaudeMonitor.Models;
 
 namespace ClaudeMonitor.Services;
@@ -10,13 +9,10 @@ namespace ClaudeMonitor.Services;
 /// <summary>
 /// Thread-safe manager for all active Claude Code sessions.
 /// Maintains session state and raises events when status changes.
-/// Includes timer-based detection of Interactive (waiting for user) state.
 /// </summary>
 public class SessionManager : IDisposable
 {
     private readonly ConcurrentDictionary<string, SessionInfo> _sessions = new();
-    private readonly ConcurrentDictionary<string, System.Threading.Timer> _interactiveTimers = new();
-    private readonly TimeSpan _interactiveTimeout = TimeSpan.FromSeconds(10);
 
     /// <summary>Raised when any session's status changes.</summary>
     public event EventHandler<SessionStatusChangedEventArgs>? StatusChanged;
@@ -87,12 +83,6 @@ public class SessionManager : IDisposable
         session.Status = newStatus;
         session.LastUpdated = DateTime.Now;
 
-        // Cancel any pending interactive timer when status changes
-        if (_interactiveTimers.TryRemove(sessionId, out var timer))
-        {
-            timer.Dispose();
-        }
-
         StatusChanged?.Invoke(this, new SessionStatusChangedEventArgs
         {
             SessionId = sessionId,
@@ -107,11 +97,6 @@ public class SessionManager : IDisposable
     /// <summary>Remove a session (session ended).</summary>
     public void RemoveSession(string sessionId)
     {
-        if (_interactiveTimers.TryRemove(sessionId, out var timer))
-        {
-            timer.Dispose();
-        }
-
         if (_sessions.TryRemove(sessionId, out var session))
         {
             StatusChanged?.Invoke(this, new SessionStatusChangedEventArgs
@@ -126,32 +111,8 @@ public class SessionManager : IDisposable
         }
     }
 
-    /// <summary>
-    /// Starts a timer that will transition the session to Interactive after the timeout.
-    /// Called when a session goes from Busy → Idle, as a heuristic for detecting
-    /// that Claude is waiting for user input.
-    /// </summary>
-    private void StartInteractiveTimer(string sessionId)
-    {
-        var timer = new System.Threading.Timer(_ =>
-        {
-            // If the session is still Idle after the timeout, assume it's waiting for user input
-            if (_sessions.TryGetValue(sessionId, out var session) && session.Status == SessionStatus.Idle)
-            {
-                UpdateStatus(sessionId, SessionStatus.Interactive);
-            }
-        }, null, _interactiveTimeout, Timeout.InfiniteTimeSpan);
-
-        _interactiveTimers[sessionId] = timer;
-    }
-
     public void Dispose()
     {
-        foreach (var timer in _interactiveTimers.Values)
-        {
-            timer.Dispose();
-        }
-        _interactiveTimers.Clear();
         _sessions.Clear();
     }
 }

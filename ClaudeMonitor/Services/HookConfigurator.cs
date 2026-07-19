@@ -30,10 +30,13 @@ public static class HookConfigurator
         [("", "busy")];
 
     private static readonly (string Matcher, string Suffix)[] PostToolUseHooks =
-        [("", "idle")];
+        [("", "busy")];
 
     private static readonly (string Matcher, string Suffix)[] UserPromptSubmitHooks =
         [("", "busy")];
+
+    private static readonly (string Matcher, string Suffix)[] NotificationHooks =
+        [("", "interactive")];
 
     private static readonly (string Matcher, string Suffix)[] StopHooks =
         [("", "idle")];
@@ -47,6 +50,7 @@ public static class HookConfigurator
         ["PreToolUse"] = PreToolUseHooks,
         ["PostToolUse"] = PostToolUseHooks,
         ["UserPromptSubmit"] = UserPromptSubmitHooks,
+        ["Notification"] = NotificationHooks,
         ["Stop"] = StopHooks,
         ["SessionEnd"] = SessionEndHooks,
     };
@@ -141,6 +145,71 @@ public static class HookConfigurator
                         if (cmd.Contains(" hook ") && h?["args"] is null)
                             return true;
                     }
+                }
+            }
+
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Check whether CC-Pulse PostToolUse hooks are using the old "idle" endpoint
+    /// instead of the current "busy" endpoint. This caused the traffic light to
+    /// turn green prematurely after each tool call, even though Claude Code was
+    /// still working. Returns true if any PostToolUse CC-Pulse hook uses "idle".
+    /// </summary>
+    public static bool UsesPostToolUseIdle()
+    {
+        try
+        {
+            if (!File.Exists(SettingsPath))
+                return false;
+
+            var json = File.ReadAllText(SettingsPath);
+            var settings = JsonNode.Parse(json)?.AsObject();
+            if (settings is null) return false;
+
+            if (!settings.ContainsKey("hooks"))
+                return false;
+
+            var hooks = settings["hooks"]!.AsObject();
+
+            if (!hooks.ContainsKey("PostToolUse"))
+                return false;
+
+            var postToolUseArray = hooks["PostToolUse"]?.AsArray();
+            if (postToolUseArray is null) return false;
+
+            foreach (var entry in postToolUseArray)
+            {
+                var entryHooks = entry?["hooks"]?.AsArray();
+                if (entryHooks is null) continue;
+
+                foreach (var h in entryHooks)
+                {
+                    var cmd = h?["command"]?.GetValue<string>() ?? "";
+                    var isCcPulse = cmd.Contains("cc-pulse-hook") || cmd.Contains("ClaudeMonitor")
+                                || cmd.Contains("CC-Pulse-Hook");
+                    if (!isCcPulse) continue;
+
+                    // Check exec form: args array contains "idle"
+                    var args = h?["args"]?.AsArray();
+                    if (args is not null)
+                    {
+                        foreach (var arg in args)
+                        {
+                            if (arg?.GetValue<string>() == "idle")
+                                return true;
+                        }
+                    }
+
+                    // Check shell form: command string contains "hook idle"
+                    if (cmd.Contains(" hook idle"))
+                        return true;
                 }
             }
 

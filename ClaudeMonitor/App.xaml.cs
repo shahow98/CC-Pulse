@@ -133,9 +133,10 @@ public partial class App : System.Windows.Application
     {
         try
         {
-            // Check if hooks need migration from legacy shell form to exec form
+            // Check if hooks need migration from legacy shell form to exec form,
+            // or from old PostToolUse→idle to PostToolUse→busy
             var needsMigration = File.Exists(SettingsPath) && HookConfigurator.AreHooksConfigured()
-                && HookConfigurator.UsesLegacyFormat();
+                && (HookConfigurator.UsesLegacyFormat() || HookConfigurator.UsesPostToolUseIdle());
 
             if (needsMigration)
             {
