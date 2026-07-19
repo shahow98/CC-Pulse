@@ -56,8 +56,9 @@ ClaudeMonitor.exe remove-hooks       # Remove CC-Pulse hooks from settings.json
 |------------|----------|--------|
 | `SessionStart` | `/start` | Idle (green) |
 | `PreToolUse` | `/busy` | Busy (yellow) |
-| `PostToolUse` | `/idle` | Idle (green) |
+| `PostToolUse` | `/busy` | Busy (yellow) |
 | `UserPromptSubmit` | `/busy` | Busy (yellow) |
+| `Notification` | `/interactive` | Interactive (red) |
 | `Stop` | `/idle` | Idle (green) |
 | `SessionEnd` | `/end` | Removed |
 

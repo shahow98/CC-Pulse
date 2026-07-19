@@ -27,7 +27,7 @@ CC-Pulse 在 `localhost:8765` 运行一个本地 HTTP 服务器，接收来自 C
 | `POST /interactive` | 会话等待用户输入 | 🔴 等待输入 |
 | `POST /end` | 会话结束 | 移除 |
 
-当会话从 **工作中 → 空闲** 转换时，CC-Pulse 启动一个 10 秒计时器。如果在该时间窗口内没有新的活动，会话将自动标记为 **等待输入**（红色）—— 这是一种启发式检测，用于判断 Claude 是否正在等待你回答问题。
+当 Claude Code 发出 **Notification** 事件（例如提问或等待用户确认）时，CC-Pulse 立即将会话标记为 **等待输入**（红色）。指示灯在工具调用之间保持黄色，只有当 `Stop` 事件触发时才变绿——表示 Claude 已完成当前回合。
 
 ## 前置要求
 
@@ -92,12 +92,13 @@ ClaudeMonitor.exe remove-hooks
 |---------|------|------|
 | `SessionStart` | `/start` | 空闲（绿色） |
 | `PreToolUse` | `/busy` | 工作中（黄色） |
-| `PostToolUse` | `/idle` | 空闲（绿色） |
+| `PostToolUse` | `/busy` | 工作中（黄色） |
 | `UserPromptSubmit` | `/busy` | 工作中（黄色） |
+| `Notification` | `/interactive` | 等待输入（红色） |
 | `Stop` | `/idle` | 空闲（绿色） |
 | `SessionEnd` | `/end` | 移除 |
 
-> **注意：** `interactive`（等待输入）状态通过空闲超时启发式自动检测，无需显式配置钩子。
+> **注意：** `interactive`（等待输入）状态由 `Notification` 钩子事件触发——当 Claude 提问或等待用户输入时，它会发出通知，CC-Pulse 捕获后将指示灯变为红色。
 
 ## 使用方法
 

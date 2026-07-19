@@ -27,7 +27,7 @@ CC-Pulse runs a local HTTP server on `localhost:8765` that receives webhook even
 | `POST /interactive` | Session is waiting for user input | 🔴 Waiting |
 | `POST /end` | Session ended | Removed |
 
-When a session transitions from **Busy → Idle**, CC-Pulse starts a 10-second timer. If no new activity occurs within that window, the session is automatically marked as **Interactive** (red) — a heuristic that detects when Claude is waiting for you to answer a question.
+When Claude Code emits a **Notification** event (e.g. asking a question or waiting for user confirmation), CC-Pulse immediately marks the session as **Interactive** (red). The light stays yellow between tool calls and only turns green when the `Stop` event fires — meaning Claude has finished its turn.
 
 ## Prerequisites
 
@@ -92,12 +92,13 @@ The hooks use a dedicated **console-mode proxy** (`CC-Pulse-Hook.exe`) that reli
 |------------|----------|--------|
 | `SessionStart` | `/start` | Idle (green) |
 | `PreToolUse` | `/busy` | Busy (yellow) |
-| `PostToolUse` | `/idle` | Idle (green) |
+| `PostToolUse` | `/busy` | Busy (yellow) |
 | `UserPromptSubmit` | `/busy` | Busy (yellow) |
+| `Notification` | `/interactive` | Interactive (red) |
 | `Stop` | `/idle` | Idle (green) |
 | `SessionEnd` | `/end` | Removed |
 
-> **Note:** The `interactive` state is detected automatically via the idle timeout heuristic — no explicit hook is needed.
+> **Note:** The `interactive` state is triggered by the `Notification` hook event — when Claude asks a question or waits for user input, it emits a notification that CC-Pulse catches and turns the light red.
 
 ## Usage
 
