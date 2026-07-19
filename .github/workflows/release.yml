@@ -22,7 +22,10 @@ jobs:
           dotnet-version: '8.0.x'
 
       - name: Install WiX v5
-        run: dotnet tool install --global wix --version 5.0.2
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          wix extension add WixToolset.UI.wixext
+          wix extension add WixToolset.Util.wixext
 
       # ── Framework-dependent build ──────────────────────────────────
       - name: Publish ClaudeMonitor (framework-dependent)
