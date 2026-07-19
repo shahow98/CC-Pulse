@@ -300,3 +300,36 @@ Diagnosed and fixed the root cause of hook proxy failing to send session status 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 10: Add i18n language settings and uninstall config cleanup
+
+**Date**: 2026-07-19
+**Task**: Add i18n language settings and uninstall config cleanup
+**Branch**: `fix/hook-stdin-and-resume-matcher`
+
+### Summary
+
+Added language settings supporting English and Chinese (zh-CN) with persistent storage in ~/.cc-pulse/settings.json. Created AppSettings service for settings persistence and Lang class for translation lookup. Replaced all hardcoded UI strings with Lang.Get() calls across StatusWindow, TrayManager, and App. Added Language submenu to tray context menu with instant switching. Auto-detects system locale on first launch. Also added uninstall options dialog in MSI installer asking whether to remove user config directory (~/.cc-pulse) during uninstall, using util:RemoveFolderEx for recursive cleanup.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `b41f670` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 9
+- **Total Sessions**: 10
 - **Last Active**: 2026-07-19
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~302 | Active |
+| `journal-1.md` | ~335 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 10 | 2026-07-19 | Add i18n language settings and uninstall config cleanup | `b41f670` | `fix/hook-stdin-and-resume-matcher` |
 | 9 | 2026-07-19 | Fix hook proxy fire-and-forget HTTP POST | `80bc659` | `fix/hook-stdin-and-resume-matcher` |
 | 8 | 2026-07-18 | MSI installer improvements: eliminate .cmd scripts, add install UI, auto-configure hooks | `b870024` | `master` |
 | 7 | 2026-07-18 | Add PowerShell MSI build script for Windows | - | `master` |
