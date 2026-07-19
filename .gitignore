@@ -8,6 +8,7 @@ obj/
 
 ## Installer
 *.wixpdb
+*.msi
 
 ## Publish output
 publish/
