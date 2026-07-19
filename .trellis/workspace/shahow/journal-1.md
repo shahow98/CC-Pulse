@@ -400,3 +400,40 @@ Removed MSI binary from Git tracking and added *.msi to .gitignore. Updated all 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 13: Add GitHub Actions CI/CD for MSI release
+
+**Date**: 2026-07-19
+**Task**: Add GitHub Actions CI/CD for MSI release
+**Branch**: `main`
+
+### Summary
+
+Created .github/workflows/release.yml to build and publish two MSI installers (framework-dependent and self-contained) on tag push (v*). Iteratively fixed WiX extension compatibility issues: added wix extension add, upgraded to v7, then reverted to v5.0.2 with pinned extension versions and WIX_OSMF_ACCEPT env var.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `3489536` | (see git log) |
+| `59865ce` | (see git log) |
+| `9af81a5` | (see git log) |
+| `09c0c49` | (see git log) |
+| `7ff63cc` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
