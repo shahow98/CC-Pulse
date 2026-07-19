@@ -437,3 +437,36 @@ Created .github/workflows/release.yml to build and publish two MSI installers (f
 ### Next Steps
 
 - None - task complete
+
+
+## Session 14: Fix traffic light premature green
+
+**Date**: 2026-07-19
+**Task**: Fix traffic light premature green
+**Branch**: `main`
+
+### Summary
+
+Fixed traffic light turning green prematurely after each tool call. PostToolUse hook now sends 'busy' instead of 'idle' so the light stays yellow while Claude Code is still working. Only the Stop event turns it green. Added Notification hook for red light when Claude waits for user input. Auto-migrates old PostToolUse→idle config on startup. Removed unused interactive timer from SessionManager.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `d067d59` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
