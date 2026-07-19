@@ -1,5 +1,5 @@
 # Build CC-Pulse MSI installer
-# Prerequisites: .NET 8 SDK, WiX v5 (dotnet tool install --global wix --version 5.0.2)
+# Prerequisites: .NET 8 SDK, WiX v7 (dotnet tool install --global wix --version 7.0.2)
 
 $ErrorActionPreference = "Stop"
 
@@ -25,7 +25,7 @@ foreach ($candidate in @(
     }
 }
 if (-not $WixExe) {
-    Write-Error "wix.exe not found. Install WiX v5: dotnet tool install --global wix --version 5.0.2"
+    Write-Error "wix.exe not found. Install WiX v7: dotnet tool install --global wix --version 7.0.2"
     exit 1
 }
 
