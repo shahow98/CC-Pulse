@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 8
-- **Last Active**: 2026-07-18
+- **Total Sessions**: 9
+- **Last Active**: 2026-07-19
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~269 | Active |
+| `journal-1.md` | ~302 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 9 | 2026-07-19 | Fix hook proxy fire-and-forget HTTP POST | `80bc659` | `fix/hook-stdin-and-resume-matcher` |
 | 8 | 2026-07-18 | MSI installer improvements: eliminate .cmd scripts, add install UI, auto-configure hooks | `b870024` | `master` |
 | 7 | 2026-07-18 | Add PowerShell MSI build script for Windows | - | `master` |
 | 6 | 2026-07-18 | Fix MSI uninstall safety and hook preservation | `4dc32f6` | `master` |

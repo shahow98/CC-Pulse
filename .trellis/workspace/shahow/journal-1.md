@@ -267,3 +267,36 @@ Replaced all .cmd hook scripts with compiled C# CLI sub-commands in ClaudeMonito
 ### Next Steps
 
 - None - task complete
+
+
+## Session 9: Fix hook proxy fire-and-forget HTTP POST
+
+**Date**: 2026-07-19
+**Task**: Fix hook proxy fire-and-forget HTTP POST
+**Branch**: `fix/hook-stdin-and-resume-matcher`
+
+### Summary
+
+Diagnosed and fixed the root cause of hook proxy failing to send session status updates: fire-and-forget (_ = PostAsync) caused the process to exit before the HTTP request was sent. Changed to synchronous .Result wait in HookProxy and HookRunner. Added GET /sessions diagnostic endpoint to HookServer for debugging.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `80bc659` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
