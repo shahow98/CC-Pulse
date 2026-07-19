@@ -470,3 +470,36 @@ Fixed traffic light turning green prematurely after each tool call. PostToolUse 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 15: Update README docs for new traffic light logic
+
+**Date**: 2026-07-19
+**Task**: Update README docs for new traffic light logic
+**Branch**: `main`
+
+### Summary
+
+Updated all three README files to reflect the traffic light logic change: PostToolUse now sends /busy instead of /idle, added Notification hook for /interactive, removed idle timeout heuristic description.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `571e23c` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
