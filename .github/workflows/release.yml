@@ -23,7 +23,7 @@ jobs:
 
       - name: Install WiX v7
         run: |
-          dotnet tool install --global wix --version 7.0.2
+          dotnet tool install --global wix --version 7.0.0
           wix extension add WixToolset.UI.wixext
           wix extension add WixToolset.Util.wixext
 

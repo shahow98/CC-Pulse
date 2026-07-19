@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build CC-Pulse MSI installer
-# Prerequisites: .NET 8 SDK, WiX v7 (dotnet tool install --global wix --version 7.0.2)
+# Prerequisites: .NET 8 SDK, WiX v7 (dotnet tool install --global wix --version 7.0.0)
 
 set -e
 
