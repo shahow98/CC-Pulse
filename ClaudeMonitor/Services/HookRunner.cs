@@ -75,8 +75,11 @@ public static class HookRunner
             var json = JsonSerializer.Serialize(payload);
             var content = new StringContent(json, Encoding.UTF8, "application/json");
 
-            // Fire-and-forget POST (don't wait for response to avoid blocking Claude Code)
-            _ = _httpClient.PostAsync($"{HookServerUrl}/{endpoint}", content);
+            // POST synchronously — we MUST wait for the response before exiting.
+            // Fire-and-forget (_ = PostAsync) causes the process to exit before
+            // the HTTP request is sent, since the runtime doesn't wait for
+            // orphaned Tasks when the process terminates.
+            _ = _httpClient.PostAsync($"{HookServerUrl}/{endpoint}", content).Result;
 
             return 0;
         }

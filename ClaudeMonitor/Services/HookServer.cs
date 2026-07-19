@@ -75,6 +75,15 @@ public class HookServer : IDisposable
 
         try
         {
+            // GET /sessions — diagnostic endpoint to list active sessions
+            if (request.HttpMethod == "GET" && (request.Url?.AbsolutePath.Trim('/').Equals("sessions", StringComparison.OrdinalIgnoreCase) ?? false))
+            {
+                var sessions = _sessionManager.GetAllSessions();
+                var sessionList = string.Join("\n", sessions.Select(s => $"{s.SessionId}|{s.Status}|{s.ProjectPath}"));
+                await SendResponseAsync(response, 200, string.IsNullOrEmpty(sessionList) ? "(no sessions)" : sessionList);
+                return;
+            }
+
             if (request.HttpMethod != "POST")
             {
                 response.StatusCode = (int)HttpStatusCode.MethodNotAllowed;
