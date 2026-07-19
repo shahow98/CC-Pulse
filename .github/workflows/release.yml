@@ -11,6 +11,8 @@ permissions:
 jobs:
   build-and-release:
     runs-on: windows-latest
+    env:
+      WIX_OSMF_ACCEPT: "yes"
 
     steps:
       - name: Checkout
@@ -21,11 +23,11 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Install WiX v7
+      - name: Install WiX v5
         run: |
-          dotnet tool install --global wix --version 7.0.0
-          wix extension add WixToolset.UI.wixext
-          wix extension add WixToolset.Util.wixext
+          dotnet tool install --global wix --version 5.0.2
+          wix extension add WixToolset.UI.wixext/5.0.2
+          wix extension add WixToolset.Util.wixext/5.0.2
 
       # ── Framework-dependent build ──────────────────────────────────
       - name: Publish ClaudeMonitor (framework-dependent)
