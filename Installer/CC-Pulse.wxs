@@ -12,7 +12,8 @@
     Version="$(var.ProductVersion)"
     UpgradeCode="$(var.UpgradeCode)"
     Language="1033"
-    Compressed="yes">
+    Compressed="yes"
+    Codepage="65001">
 
     <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
 
@@ -22,6 +23,14 @@
     <ui:WixUI Id="WixUI_InstallDir" />
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
     <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
+
+    <!--
+      Optional install features — controlled by checkboxes.
+      Default to 1 (checked). When the user unchecks, the property
+      is unset and the corresponding Feature Level drops to 0 (not installed).
+    -->
+    <Property Id="INSTALLDESKTOPSHORTCUT" Value="1" Secure="yes" />
+    <Property Id="AUTOSTARTAPP" Value="1" Secure="yes" />
 
     <!--
       Pre-install check: verify Claude Code is installed.
@@ -55,7 +64,7 @@
       <Directory Id="ApplicationProgramsFolder" Name="$(var.ProductName)" />
     </StandardDirectory>
 
-    <!-- Autostart registry entry -->
+    <!-- Autostart registry entry (optional, controlled by AUTOSTARTAPP checkbox) -->
     <StandardDirectory Id="TARGETDIR">
       <Component Id="AutoStartComponent" Guid="F1A2B3C4-D5E6-7890-ABCD-EF1234567890">
         <RegistryValue
@@ -143,6 +152,23 @@
       </Component>
     </DirectoryRef>
 
+    <!-- Desktop shortcut (optional, controlled by INSTALLDESKTOPSHORTCUT checkbox) -->
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="DesktopShortcutComponent" Guid="B8C9D0E1-F2A3-4567-BCDE-678901234567">
+        <Shortcut Id="DesktopShortcut"
+                  Name="$(var.ProductName)"
+                  Target="[INSTALLFOLDER]ClaudeMonitor.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="AppIcon" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\$(var.Manufacturer)\$(var.ProductName)"
+                       Name="DesktopShortcutInstalled"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
     <!-- Custom action: stop running process on uninstall -->
     <CustomAction Id="StopProcess"
                   FileRef="ClaudeMonitorExe"
@@ -169,13 +195,78 @@
     <Feature Id="MainFeature" Title="$(var.ProductName)" Level="1">
       <ComponentGroupRef Id="ApplicationFiles" />
       <ComponentRef Id="ApplicationShortcuts" />
-      <ComponentRef Id="AutoStartComponent" />
       <ComponentRef Id="InstallPathRegistry" />
+      <Feature Id="DesktopShortcutFeature"
+               Title="Desktop Shortcut"
+               Description="Create a shortcut on the desktop."
+               Level="1">
+        <Level Value="0" Condition="NOT INSTALLDESKTOPSHORTCUT" />
+        <ComponentRef Id="DesktopShortcutComponent" />
+      </Feature>
+      <Feature Id="AutoStartFeature"
+               Title="Auto-start on Login"
+               Description="Automatically start CC-Pulse when you log in to Windows."
+               Level="1">
+        <Level Value="0" Condition="NOT AUTOSTARTAPP" />
+        <ComponentRef Id="AutoStartComponent" />
+      </Feature>
     </Feature>
 
     <!-- App icon for Add/Remove Programs -->
     <Icon Id="AppIcon" SourceFile="$(var.SourceDir)Assets\Icons\app.ico" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+
+    <!--
+      Inject an "Installation Options" dialog with checkboxes into
+      the WixUI_InstallDir wizard flow:
+        LicenseAgreementDlg → InstallDirDlg → InstallOptionsDlg → VerifyReadyDlg
+    -->
+    <UI>
+      <Dialog Id="InstallOptionsDlg" Width="370" Height="270" Title="$(var.ProductName) Setup">
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="200" Height="15" Transparent="yes"
+                 Text="{\WixUI_Font_Title}Installation Options" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes"
+                 Text="Choose optional installation features." />
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44"
+                 Text="WixUI_Bmp_Banner" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+
+        <Control Id="DesktopShortcutCheckbox" Type="CheckBox"
+                 X="20" Y="70" Width="290" Height="17"
+                 Property="INSTALLDESKTOPSHORTCUT"
+                 CheckBoxValue="1"
+                 Text="Create a &amp;desktop shortcut" />
+        <Control Id="AutoStartCheckbox" Type="CheckBox"
+                 X="20" Y="95" Width="290" Height="17"
+                 Property="AUTOSTARTAPP"
+                 CheckBoxValue="1"
+                 Text="Automatically start &amp;when logging in to Windows" />
+
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17"
+                 Text="&amp;Back">
+          <Publish Event="NewDialog" Value="InstallDirDlg" Order="1" />
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17"
+                 Default="yes" Text="&amp;Install">
+          <Publish Event="NewDialog" Value="VerifyReadyDlg" Order="1" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17"
+                 Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <!--
+        Override the WixUI_InstallDir navigation flow to insert InstallOptionsDlg.
+        In WiX v4/v5, you override a publish by providing a new one with the same
+        Dialog/Control/Event and a higher Order. The original publish is suppressed.
+      -->
+      <Publish Dialog="InstallDirDlg" Control="Next" Event="NewDialog"
+               Value="InstallOptionsDlg" Order="5" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog"
+               Value="InstallOptionsDlg" Order="5" />
+    </UI>
 
   </Package>
 </Wix>

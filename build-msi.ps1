@@ -7,6 +7,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ScriptDir
 
 $PublishDir = "ClaudeMonitor\bin\Release\net8.0-windows\win-x64\publish"
+$HookProxyPublishDir = "ClaudeMonitor.HookProxy\bin\Release\net8.0-windows\win-x64\publish"
 $HooksDir   = "ClaudeMonitor\Hooks"
 $SourceDir  = "ClaudeMonitor\"
 $MsiOut     = "Installer\CC-Pulse.msi"
@@ -14,7 +15,7 @@ $MsiOut     = "Installer\CC-Pulse.msi"
 # Locate wix.exe — prefer PATH, then dotnet global tools, then known locations
 $WixExe = $null
 foreach ($candidate in @(
-    (Get-Command wix -ErrorAction SilentlyContinue)?.Source,
+    (Get-Command wix -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source),
     "$env:USERPROFILE\.dotnet\tools\wix.exe",
     "C:\Program Files\WiX Toolset v7.0\bin\wix.exe"
 )) {
@@ -32,14 +33,23 @@ Write-Host "=== Building CC-Pulse MSI Installer ===" -ForegroundColor Cyan
 Write-Host "Using wix: $WixExe"
 
 # Step 1: Publish the application
-Write-Host "[1/2] Publishing ClaudeMonitor..." -ForegroundColor Yellow
+Write-Host "[1/3] Publishing ClaudeMonitor..." -ForegroundColor Yellow
 dotnet publish ClaudeMonitor\ClaudeMonitor.csproj -r win-x64 -c Release
 
-# Step 2: Build the MSI
-Write-Host "[2/2] Building MSI..." -ForegroundColor Yellow
+# Step 2: Publish the hook proxy
+Write-Host "[2/3] Publishing HookProxy..." -ForegroundColor Yellow
+dotnet publish ClaudeMonitor.HookProxy\ClaudeMonitor.HookProxy.csproj -r win-x64 -c Release
+
+# Step 3: Build the MSI
+Write-Host "[3/3] Building MSI..." -ForegroundColor Yellow
+
+# Copy License.rtf to root so WixVariable can find it (it resolves relative to working dir)
+Copy-Item "Installer\License.rtf" "License.rtf" -Force
+
 & $WixExe build `
   -arch x64 `
   -d "PublishDir=$PublishDir\" `
+  -d "HookProxyPublishDir=$HookProxyPublishDir\" `
   -d "HooksDir=$HooksDir\" `
   -d "SourceDir=$SourceDir" `
   -ext WixToolset.UI.wixext `

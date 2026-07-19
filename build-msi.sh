@@ -25,6 +25,10 @@ dotnet publish ClaudeMonitor.HookProxy/ClaudeMonitor.HookProxy.csproj -r win-x64
 
 # Step 3: Build the MSI
 echo "[3/3] Building MSI..."
+
+# Copy License.rtf to root so WixVariable can find it (it resolves relative to working dir)
+cp Installer/License.rtf License.rtf
+
 wix build \
   -arch x64 \
   -d "PublishDir=$PUBLISH_DIR/" \
