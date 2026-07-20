@@ -15,7 +15,6 @@ public static class Lang
         // Status text
         ["StatusIdle"] = "Idle",
         ["StatusBusy"] = "Working…",
-        ["StatusInteractive"] = "Waiting for input",
         ["StatusUnknown"] = "Unknown",
 
         // Status window
@@ -55,7 +54,6 @@ public static class Lang
         // Status text
         ["StatusIdle"] = "空闲",
         ["StatusBusy"] = "工作中…",
-        ["StatusInteractive"] = "等待输入",
         ["StatusUnknown"] = "未知",
 
         // Status window

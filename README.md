@@ -2,11 +2,11 @@
 
 **English** | [中文](./README.zh-CN.md)
 
-A lightweight Windows system tray monitor for [Claude Code](https://claude.ai/code) sessions. CC-Pulse displays a traffic-light indicator in your system tray and a floating on-top window so you can see at a glance whether Claude is idle, working, or waiting for your input.
+A lightweight Windows system tray monitor for [Claude Code](https://claude.ai/code) sessions. CC-Pulse displays a traffic-light indicator in your system tray and a floating on-top window so you can see at a glance whether Claude is working or idle.
 
 ## Features
 
-- **Traffic-light tray icon** — green (idle), yellow (working), red (waiting for input)
+- **Traffic-light tray icon** — red (working), green (idle / waiting for input)
 - **Floating status window** — always-on-top, draggable card showing all active sessions
 - **Multi-session support** — tracks multiple Claude Code sessions simultaneously
 - **Auto-configure hooks** — hooks are set up automatically on first launch; no manual editing needed
@@ -22,12 +22,12 @@ CC-Pulse runs a local HTTP server on `localhost:8765` that receives webhook even
 | Route | Meaning | Indicator |
 |-------|---------|-----------|
 | `POST /start` | New session started | 🟢 Idle |
-| `POST /busy` | Session is using tools | 🟡 Working |
+| `POST /busy` | Session is working (thinking, generating, using tools) | 🔴 Working |
 | `POST /idle` | Session finished a task | 🟢 Idle |
-| `POST /interactive` | Session is waiting for user input | 🔴 Waiting |
+| `POST /interactive` | Session is waiting for user input | 🟢 Idle |
 | `POST /end` | Session ended | Removed |
 
-When Claude Code emits a **Notification** event (e.g. asking a question or waiting for user confirmation), CC-Pulse immediately marks the session as **Interactive** (red). The light stays yellow between tool calls and only turns green when the `Stop` event fires — meaning Claude has finished its turn.
+When Claude Code is actively working (thinking, generating text, or using tools), the light turns **red**. When Claude finishes its turn (`Stop` event) or is waiting for user input (`Notification` event), the light turns **green**.
 
 ## Prerequisites
 
@@ -91,14 +91,14 @@ The hooks use a dedicated **console-mode proxy** (`CC-Pulse-Hook.exe`) that reli
 | Hook Event | Endpoint | Status |
 |------------|----------|--------|
 | `SessionStart` | `/start` | Idle (green) |
-| `PreToolUse` | `/busy` | Busy (yellow) |
-| `PostToolUse` | `/busy` | Busy (yellow) |
-| `UserPromptSubmit` | `/busy` | Busy (yellow) |
-| `Notification` | `/interactive` | Interactive (red) |
+| `PreToolUse` | `/busy` | Busy (red) |
+| `PostToolUse` | `/busy` | Busy (red) |
+| `UserPromptSubmit` | `/busy` | Busy (red) |
+| `Notification` | `/interactive` | Idle (green) |
 | `Stop` | `/idle` | Idle (green) |
 | `SessionEnd` | `/end` | Removed |
 
-> **Note:** The `interactive` state is triggered by the `Notification` hook event — when Claude asks a question or waits for user input, it emits a notification that CC-Pulse catches and turns the light red.
+> **Note:** The `Notification` hook event fires when Claude asks a question or waits for user input — CC-Pulse treats this as Idle (green), since Claude is no longer actively working.
 
 ## Usage
 
@@ -141,7 +141,7 @@ ClaudeMonitor/
 ├── Hooks/
 │   └── cc-pulse-hook.sh             # Bash hook script (for Git Bash / WSL)
 └── Assets/
-    └── Icons/                        # Tray icons (green/yellow/red/app .ico)
+    └── Icons/                        # Tray icons (green/red/app .ico)
 
 ClaudeMonitor.HookProxy/
 ├── Program.cs                        # Console-mode hook proxy (reliable stdin reading)

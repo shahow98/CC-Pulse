@@ -170,7 +170,6 @@ public partial class StatusWindow : Window
 public class StatusToColorConverter : IValueConverter
 {
     private static readonly SolidColorBrush GreenBrush = new(System.Windows.Media.Color.FromRgb(46, 204, 113));
-    private static readonly SolidColorBrush YellowBrush = new(System.Windows.Media.Color.FromRgb(241, 196, 15));
     private static readonly SolidColorBrush RedBrush = new(System.Windows.Media.Color.FromRgb(231, 76, 60));
 
     public object Convert(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
@@ -179,8 +178,7 @@ public class StatusToColorConverter : IValueConverter
         {
             return status switch
             {
-                SessionStatus.Busy => YellowBrush,
-                SessionStatus.Interactive => RedBrush,
+                SessionStatus.Busy => RedBrush,
                 _ => GreenBrush
             };
         }
@@ -204,7 +202,6 @@ public class StatusToTextConverter : IValueConverter
             {
                 SessionStatus.Idle => Lang.Get("StatusIdle"),
                 SessionStatus.Busy => Lang.Get("StatusBusy"),
-                SessionStatus.Interactive => Lang.Get("StatusInteractive"),
                 _ => Lang.Get("StatusUnknown")
             };
         }

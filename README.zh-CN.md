@@ -2,11 +2,11 @@
 
 [English](./README.md) | **中文**
 
-一个轻量级的 Windows 系统托盘监控工具，用于 [Claude Code](https://claude.ai/code) 会话。CC-Pulse 在系统托盘和悬浮置顶窗口中显示红绿灯状态指示，让你一眼就能看到 Claude 是空闲、工作中，还是在等待你的输入。
+一个轻量级的 Windows 系统托盘监控工具，用于 [Claude Code](https://claude.ai/code) 会话。CC-Pulse 在系统托盘和悬浮置顶窗口中显示红绿灯状态指示，让你一眼就能看到 Claude 是工作中还是空闲。
 
 ## 功能特性
 
-- **红绿灯托盘图标** — 绿色（空闲）、黄色（工作中）、红色（等待输入）
+- **红绿灯托盘图标** — 红色（工作中）、绿色（空闲 / 等待输入）
 - **悬浮状态窗口** — 始终置顶、可拖动的卡片，显示所有活跃会话
 - **多会话支持** — 同时追踪多个 Claude Code 会话
 - **自动配置钩子** — 首次启动时自动配置 Claude Code 钩子，无需手动编辑
@@ -22,12 +22,12 @@ CC-Pulse 在 `localhost:8765` 运行一个本地 HTTP 服务器，接收来自 C
 | 路由 | 含义 | 指示灯 |
 |------|------|--------|
 | `POST /start` | 新会话启动 | 🟢 空闲 |
-| `POST /busy` | 会话正在使用工具 | 🟡 工作中 |
+| `POST /busy` | 会话正在工作（思考、生成、使用工具） | 🔴 工作中 |
 | `POST /idle` | 会话完成一项任务 | 🟢 空闲 |
-| `POST /interactive` | 会话等待用户输入 | 🔴 等待输入 |
+| `POST /interactive` | 会话等待用户输入 | 🟢 空闲 |
 | `POST /end` | 会话结束 | 移除 |
 
-当 Claude Code 发出 **Notification** 事件（例如提问或等待用户确认）时，CC-Pulse 立即将会话标记为 **等待输入**（红色）。指示灯在工具调用之间保持黄色，只有当 `Stop` 事件触发时才变绿——表示 Claude 已完成当前回合。
+当 Claude Code 正在工作（思考、生成文本或使用工具）时，指示灯变为**红色**。当 Claude 完成当前回合（`Stop` 事件）或等待用户输入（`Notification` 事件）时，指示灯变为**绿色**。
 
 ## 前置要求
 
@@ -91,14 +91,14 @@ ClaudeMonitor.exe remove-hooks
 | 钩子事件 | 端点 | 状态 |
 |---------|------|------|
 | `SessionStart` | `/start` | 空闲（绿色） |
-| `PreToolUse` | `/busy` | 工作中（黄色） |
-| `PostToolUse` | `/busy` | 工作中（黄色） |
-| `UserPromptSubmit` | `/busy` | 工作中（黄色） |
-| `Notification` | `/interactive` | 等待输入（红色） |
+| `PreToolUse` | `/busy` | 工作中（红色） |
+| `PostToolUse` | `/busy` | 工作中（红色） |
+| `UserPromptSubmit` | `/busy` | 工作中（红色） |
+| `Notification` | `/interactive` | 空闲（绿色） |
 | `Stop` | `/idle` | 空闲（绿色） |
 | `SessionEnd` | `/end` | 移除 |
 
-> **注意：** `interactive`（等待输入）状态由 `Notification` 钩子事件触发——当 Claude 提问或等待用户输入时，它会发出通知，CC-Pulse 捕获后将指示灯变为红色。
+> **注意：** `Notification` 钩子事件在 Claude 提问或等待用户输入时触发——CC-Pulse 将此视为空闲（绿色），因为 Claude 不再主动工作。
 
 ## 使用方法
 
@@ -141,7 +141,7 @@ ClaudeMonitor/
 ├── Hooks/
 │   └── cc-pulse-hook.sh             # Bash 钩子脚本（用于 Git Bash / WSL）
 └── Assets/
-    └── Icons/                        # 托盘图标 (green/yellow/red/app .ico)
+    └── Icons/                        # 托盘图标 (green/red/app .ico)
 
 ClaudeMonitor.HookProxy/
 ├── Program.cs                        # 控制台模式钩子代理（可靠的 stdin 读取）

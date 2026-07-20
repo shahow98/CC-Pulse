@@ -9,14 +9,11 @@ namespace ClaudeMonitor.Models;
 /// </summary>
 public enum SessionStatus
 {
-    /// <summary>Session is idle, waiting for user input or between tasks (green).</summary>
+    /// <summary>Session is idle, waiting for user input, or between tasks (green).</summary>
     Idle,
 
-    /// <summary>Session is actively processing / using tools (yellow).</summary>
-    Busy,
-
-    /// <summary>Session is waiting for user to respond to a question (red).</summary>
-    Interactive
+    /// <summary>Session is actively working — thinking, generating, or using tools (red).</summary>
+    Busy
 }
 
 /// <summary>

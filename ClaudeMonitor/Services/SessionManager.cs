@@ -42,7 +42,7 @@ public class SessionManager : IDisposable
 
     /// <summary>
     /// Gets the aggregate (worst) status across all sessions.
-    /// Red > Yellow > Green. Returns Idle if no sessions.
+    /// Red > Green. Returns Idle if no sessions.
     /// </summary>
     public SessionStatus AggregateStatus
     {

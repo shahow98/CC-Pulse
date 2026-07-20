@@ -228,7 +228,7 @@ public static class HookConfigurator
     /// <summary>
     /// Check whether CC-Pulse is missing the StopFailure hook.
     /// StopFailure fires when a turn ends on an API error (rate_limit, overloaded,
-    /// billing_error). Without this hook, the traffic light stays yellow after
+    /// billing_error). Without this hook, the traffic light stays red after
     /// API errors because the Stop hook does not fire in that case either.
     /// Returns true if no StopFailure CC-Pulse hook is configured.
     /// </summary>

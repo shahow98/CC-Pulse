@@ -112,15 +112,13 @@ public class TrayManager : IDisposable
 
         _notifyIcon.Icon = status switch
         {
-            SessionStatus.Interactive => LoadIcon("red.ico"),
-            SessionStatus.Busy => LoadIcon("yellow.ico"),
+            SessionStatus.Busy => LoadIcon("red.ico"),
             _ => LoadIcon("green.ico")
         };
 
         var statusText = status switch
         {
             SessionStatus.Busy => Lang.Get("StatusBusy"),
-            SessionStatus.Interactive => Lang.Get("StatusInteractive"),
             _ => Lang.Get("StatusIdle")
         };
 
