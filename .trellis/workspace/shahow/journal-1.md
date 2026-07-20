@@ -536,3 +536,36 @@ Added watchdog timer (60s) in SessionManager to auto-reset Busy→Idle when no a
 ### Next Steps
 
 - None - task complete
+
+
+## Session 17: Simplify traffic light to red/green
+
+**Date**: 2026-07-20
+**Task**: Simplify traffic light to red/green
+**Branch**: `main`
+
+### Summary
+
+Simplified traffic light from 3-color (green/yellow/red) to 2-color (red/green). Red = agent working (thinking, generating, using tools). Green = idle or waiting for user input. Removed Interactive enum state, updated HookServer/TrayManager/StatusWindow/Lang/README accordingly.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `926d198` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

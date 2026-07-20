@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 16
+- **Total Sessions**: 17
 - **Last Active**: 2026-07-20
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~538 | Active |
+| `journal-1.md` | ~571 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 17 | 2026-07-20 | Simplify traffic light to red/green | `926d198` | `main` |
 | 16 | 2026-07-20 | Fix traffic light stuck yellow on Ctrl+C/ESC interrupt | `ff471f8` | `main` |
 | 15 | 2026-07-19 | Update README docs for new traffic light logic | `571e23c` | `main` |
 | 14 | 2026-07-19 | Fix traffic light premature green | `d067d59` | `main` |
