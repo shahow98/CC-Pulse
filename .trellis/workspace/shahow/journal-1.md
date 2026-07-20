@@ -569,3 +569,36 @@ Simplified traffic light from 3-color (green/yellow/red) to 2-color (red/green).
 ### Next Steps
 
 - None - task complete
+
+
+## Session 18: Hide CC-Pulse from Alt+Tab
+
+**Date**: 2026-07-20
+**Task**: Hide CC-Pulse from Alt+Tab
+**Branch**: `main`
+
+### Summary
+
+Added WS_EX_TOOLWINDOW extended window style to remove the floating CC-Pulse window from the Alt+Tab switcher. The window is always-on-top so there is no need to switch to it via Alt+Tab.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `b4295e8` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
