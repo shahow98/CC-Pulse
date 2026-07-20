@@ -124,12 +124,20 @@ public class HookServer : IDisposable
                 break;
             case "busy":
                 _sessionManager.UpdateStatus(sessionId, SessionStatus.Busy);
+                // Reset the watchdog timer on activity to keep the light yellow
+                // while Claude Code is actively working
+                _sessionManager.ResetBusyTimeout(sessionId);
                 break;
             case "idle":
                 _sessionManager.UpdateStatus(sessionId, SessionStatus.Idle);
                 break;
             case "interactive":
                 _sessionManager.UpdateStatus(sessionId, SessionStatus.Interactive);
+                break;
+            case "stopfailure":
+                // StopFailure fires when a turn ends on API error (rate_limit, etc.)
+                // The turn has ended, so set to Idle
+                _sessionManager.UpdateStatus(sessionId, SessionStatus.Idle);
                 break;
             case "end":
                 _sessionManager.RemoveSession(sessionId);

@@ -134,9 +134,11 @@ public partial class App : System.Windows.Application
         try
         {
             // Check if hooks need migration from legacy shell form to exec form,
-            // or from old PostToolUse→idle to PostToolUse→busy
+            // or from old PostToolUse→idle to PostToolUse→busy,
+            // or if StopFailure hook is missing (needed for API error detection)
             var needsMigration = File.Exists(SettingsPath) && HookConfigurator.AreHooksConfigured()
-                && (HookConfigurator.UsesLegacyFormat() || HookConfigurator.UsesPostToolUseIdle());
+                && (HookConfigurator.UsesLegacyFormat() || HookConfigurator.UsesPostToolUseIdle()
+                    || HookConfigurator.UsesMissingStopFailure());
 
             if (needsMigration)
             {

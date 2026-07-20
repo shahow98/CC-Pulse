@@ -41,6 +41,9 @@ public static class HookConfigurator
     private static readonly (string Matcher, string Suffix)[] StopHooks =
         [("", "idle")];
 
+    private static readonly (string Matcher, string Suffix)[] StopFailureHooks =
+        [("", "idle")];
+
     private static readonly (string Matcher, string Suffix)[] SessionEndHooks =
         [("", "end")];
 
@@ -52,6 +55,7 @@ public static class HookConfigurator
         ["UserPromptSubmit"] = UserPromptSubmitHooks,
         ["Notification"] = NotificationHooks,
         ["Stop"] = StopHooks,
+        ["StopFailure"] = StopFailureHooks,
         ["SessionEnd"] = SessionEndHooks,
     };
 
@@ -218,6 +222,58 @@ public static class HookConfigurator
         catch
         {
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Check whether CC-Pulse is missing the StopFailure hook.
+    /// StopFailure fires when a turn ends on an API error (rate_limit, overloaded,
+    /// billing_error). Without this hook, the traffic light stays yellow after
+    /// API errors because the Stop hook does not fire in that case either.
+    /// Returns true if no StopFailure CC-Pulse hook is configured.
+    /// </summary>
+    public static bool UsesMissingStopFailure()
+    {
+        try
+        {
+            if (!File.Exists(SettingsPath))
+                return true;
+
+            var json = File.ReadAllText(SettingsPath);
+            var settings = JsonNode.Parse(json)?.AsObject();
+            if (settings is null) return true;
+
+            if (!settings.ContainsKey("hooks"))
+                return true;
+
+            var hooks = settings["hooks"]!.AsObject();
+
+            if (!hooks.ContainsKey("StopFailure"))
+                return true;
+
+            var stopFailureArray = hooks["StopFailure"]?.AsArray();
+            if (stopFailureArray is null) return true;
+
+            // Check if any CC-Pulse hook exists in the StopFailure entries
+            foreach (var entry in stopFailureArray)
+            {
+                var entryHooks = entry?["hooks"]?.AsArray();
+                if (entryHooks is null) continue;
+
+                foreach (var h in entryHooks)
+                {
+                    var cmd = h?["command"]?.GetValue<string>() ?? "";
+                    if (cmd.Contains("cc-pulse-hook") || cmd.Contains("ClaudeMonitor")
+                                || cmd.Contains("CC-Pulse-Hook"))
+                        return false; // Found a CC-Pulse StopFailure hook
+                }
+            }
+
+            return true; // No CC-Pulse hook found in StopFailure
+        }
+        catch
+        {
+            return true;
         }
     }
 
