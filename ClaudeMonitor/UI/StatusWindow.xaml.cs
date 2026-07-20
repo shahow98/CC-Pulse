@@ -2,9 +2,11 @@ using System;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Data;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using ClaudeMonitor.Models;
 using ClaudeMonitor.Services;
@@ -19,6 +21,20 @@ public partial class StatusWindow : Window
     private readonly SessionManager _sessionManager;
     private readonly ObservableCollection<SessionInfo> _sessions;
     private bool _isHidden;
+
+    #region Win32 interop — hide from Alt+Tab
+
+    private const int GWL_EXSTYLE = -20;
+    private const uint WS_EX_TOOLWINDOW = 0x00000080;
+    private const uint WS_EX_APPWINDOW = 0x00040000;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
+    #endregion
 
     public StatusWindow(SessionManager sessionManager)
     {
@@ -42,6 +58,19 @@ public partial class StatusWindow : Window
         EmptyMessage.Text = Lang.Get("NoActiveSessions");
 
         UpdateEmptyState();
+    }
+
+    /// <summary>
+    /// After the Win32 window handle is created, apply WS_EX_TOOLWINDOW
+    /// so the window is excluded from Alt+Tab and the taskbar.
+    /// </summary>
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+
+        var helper = new WindowInteropHelper(this);
+        int exStyle = GetWindowLong(helper.Handle, GWL_EXSTYLE);
+        SetWindowLong(helper.Handle, GWL_EXSTYLE, exStyle | (int)WS_EX_TOOLWINDOW & ~(int)WS_EX_APPWINDOW);
     }
 
     /// <summary>Position the window at the top-right corner with some margin.</summary>
