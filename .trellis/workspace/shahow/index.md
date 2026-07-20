@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 15
-- **Last Active**: 2026-07-19
+- **Total Sessions**: 16
+- **Last Active**: 2026-07-20
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~505 | Active |
+| `journal-1.md` | ~538 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 16 | 2026-07-20 | Fix traffic light stuck yellow on Ctrl+C/ESC interrupt | `ff471f8` | `main` |
 | 15 | 2026-07-19 | Update README docs for new traffic light logic | `571e23c` | `main` |
 | 14 | 2026-07-19 | Fix traffic light premature green | `d067d59` | `main` |
 | 13 | 2026-07-19 | Add GitHub Actions CI/CD for MSI release | `3489536`, `59865ce`, `9af81a5`, `09c0c49`, `7ff63cc` | `main` |

@@ -503,3 +503,36 @@ Updated all three README files to reflect the traffic light logic change: PostTo
 ### Next Steps
 
 - None - task complete
+
+
+## Session 16: Fix traffic light stuck yellow on Ctrl+C/ESC interrupt
+
+**Date**: 2026-07-20
+**Task**: Fix traffic light stuck yellow on Ctrl+C/ESC interrupt
+**Branch**: `main`
+
+### Summary
+
+Added watchdog timer (60s) in SessionManager to auto-reset Busy→Idle when no activity detected, since Claude Code's Stop hook does not fire on user interrupts. Added StopFailure hook for API error detection. Added ResetBusyTimeout() to keep watchdog alive during active work. Added migration check for missing StopFailure hook.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ff471f8` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
