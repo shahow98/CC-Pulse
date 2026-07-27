@@ -41,6 +41,8 @@ public class TrayManager : IDisposable
 
         // Listen for language changes to rebuild menu
         AppSettings.Instance.LanguageChanged += OnLanguageChanged;
+        // Listen for opacity changes to update check marks
+        AppSettings.Instance.OpacityChanged += OnOpacityChanged;
     }
 
     /// <summary>Build (or rebuild) the context menu with localized strings.</summary>
@@ -64,6 +66,21 @@ public class TrayManager : IDisposable
         languageItem.DropDownItems.Add(chineseItem);
 
         contextMenu.Items.Add(languageItem);
+
+        // Opacity submenu
+        var opacityItem = new ToolStripMenuItem(Lang.Get("TrayOpacity"));
+
+        var opacityLevels = new[] { 0.3, 0.5, 0.7, 0.9, 1.0 };
+        foreach (var level in opacityLevels)
+        {
+            var label = Lang.Get("TrayOpacityValue", (int)(level * 100));
+            var item = new ToolStripMenuItem(label) { Tag = level };
+            item.Click += (_, _) => AppSettings.Instance.Opacity = level;
+            opacityItem.DropDownItems.Add(item);
+        }
+
+        UpdateOpacityCheckMarks(opacityItem);
+        contextMenu.Items.Add(opacityItem);
 
         contextMenu.Items.Add(new ToolStripSeparator());
 
@@ -91,6 +108,18 @@ public class TrayManager : IDisposable
         }
     }
 
+    /// <summary>Set the check mark on the current opacity item.</summary>
+    private void UpdateOpacityCheckMarks(ToolStripMenuItem opacityItem)
+    {
+        var currentOpacity = AppSettings.Instance.Opacity;
+        foreach (ToolStripMenuItem item in opacityItem.DropDownItems)
+        {
+            // Tag stores the opacity double value
+            if (item.Tag is double level)
+                item.Checked = Math.Abs(currentOpacity - level) < 0.001;
+        }
+    }
+
     private void OnSessionsChanged(object? sender, EventArgs e)
     {
         UpdateIcon();
@@ -102,6 +131,13 @@ public class TrayManager : IDisposable
         BuildContextMenu();
         // Update tooltip text
         UpdateIcon();
+    }
+
+    private void OnOpacityChanged(object? sender, EventArgs e)
+    {
+        // Update check marks on the opacity submenu
+        if (_notifyIcon.ContextMenuStrip?.Items[2] is ToolStripMenuItem opacityItem)
+            UpdateOpacityCheckMarks(opacityItem);
     }
 
     /// <summary>Update the tray icon and tooltip based on aggregate status.</summary>
@@ -163,6 +199,7 @@ public class TrayManager : IDisposable
 
         _sessionManager.SessionsChanged -= OnSessionsChanged;
         AppSettings.Instance.LanguageChanged -= OnLanguageChanged;
+        AppSettings.Instance.OpacityChanged -= OnOpacityChanged;
 
         _notifyIcon.Visible = false;
         _notifyIcon.Icon?.Dispose();
