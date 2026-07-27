@@ -51,6 +51,10 @@ public partial class StatusWindow : Window
         // Listen for language changes to refresh text
         AppSettings.Instance.LanguageChanged += OnLanguageChanged;
 
+        // Apply saved opacity
+        Opacity = AppSettings.Instance.Opacity;
+        AppSettings.Instance.OpacityChanged += OnOpacityChanged;
+
         // Position at top-right corner of the primary screen
         PositionWindow();
 
@@ -186,11 +190,20 @@ public partial class StatusWindow : Window
         });
     }
 
+    private void OnOpacityChanged(object? sender, EventArgs e)
+    {
+        Dispatcher.Invoke(() =>
+        {
+            Opacity = AppSettings.Instance.Opacity;
+        });
+    }
+
     protected override void OnClosing(CancelEventArgs e)
     {
         _sessionManager.StatusChanged -= OnStatusChanged;
         _sessionManager.SessionsChanged -= OnSessionsChanged;
         AppSettings.Instance.LanguageChanged -= OnLanguageChanged;
+        AppSettings.Instance.OpacityChanged -= OnOpacityChanged;
         base.OnClosing(e);
     }
 }

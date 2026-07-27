@@ -27,6 +27,8 @@ public static class Lang
         ["TrayShowHide"] = "Show/Hide Window",
         ["TrayExit"] = "Exit",
         ["TrayLanguage"] = "Language",
+        ["TrayOpacity"] = "Opacity",
+        ["TrayOpacityValue"] = "{0}%",
 
         // Messages — Claude Code not found
         ["MsgClaudeNotFoundBody"] =
@@ -66,6 +68,8 @@ public static class Lang
         ["TrayShowHide"] = "显示/隐藏窗口",
         ["TrayExit"] = "退出",
         ["TrayLanguage"] = "语言",
+        ["TrayOpacity"] = "透明度",
+        ["TrayOpacityValue"] = "{0}%",
 
         // Messages — Claude Code not found
         ["MsgClaudeNotFoundBody"] =

@@ -27,6 +27,7 @@ public class AppSettings : IDisposable
     private static readonly object _lock = new();
 
     private string _language = "en";
+    private double _opacity = 0.9;
 
     /// <summary>Singleton instance.</summary>
     public static AppSettings Instance
@@ -57,6 +58,23 @@ public class AppSettings : IDisposable
     /// <summary>Raised when the language setting changes.</summary>
     public event EventHandler? LanguageChanged;
 
+    /// <summary>Window opacity: 0.1 (nearly invisible) to 1.0 (fully opaque). Default 0.9.</summary>
+    public double Opacity
+    {
+        get => _opacity;
+        set
+        {
+            var clamped = Math.Clamp(value, 0.1, 1.0);
+            if (Math.Abs(_opacity - clamped) < 0.001) return;
+            _opacity = clamped;
+            Save();
+            OpacityChanged?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    /// <summary>Raised when the opacity setting changes.</summary>
+    public event EventHandler? OpacityChanged;
+
     private AppSettings()
     {
         Load();
@@ -74,6 +92,13 @@ public class AppSettings : IDisposable
                 if (data?.Language is not null)
                 {
                     _language = data.Language;
+                }
+                if (data?.Opacity.HasValue == true)
+                {
+                    _opacity = Math.Clamp(data.Opacity.Value, 0.1, 1.0);
+                }
+                if (data?.Language is not null || data?.Opacity.HasValue == true)
+                {
                     return;
                 }
             }
@@ -93,7 +118,7 @@ public class AppSettings : IDisposable
         try
         {
             Directory.CreateDirectory(SettingsDir);
-            var data = new SettingsData { Language = _language };
+            var data = new SettingsData { Language = _language, Opacity = _opacity };
             var json = JsonSerializer.Serialize(data, JsonOptions);
             File.WriteAllText(SettingsFilePath, json);
         }
@@ -120,11 +145,15 @@ public class AppSettings : IDisposable
     public void Dispose()
     {
         LanguageChanged = null;
+        OpacityChanged = null;
     }
 
     private class SettingsData
     {
         [JsonPropertyName("language")]
         public string? Language { get; set; }
+
+        [JsonPropertyName("opacity")]
+        public double? Opacity { get; set; }
     }
 }
