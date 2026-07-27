@@ -602,3 +602,37 @@ Added WS_EX_TOOLWINDOW extended window style to remove the floating CC-Pulse win
 ### Next Steps
 
 - None - task complete
+
+
+## Session 19: Fix opacity check marks not updating in tray menu
+
+**Date**: 2026-07-27
+**Task**: Fix opacity check marks not updating in tray menu
+**Branch**: `main`
+
+### Summary
+
+Fixed tray menu opacity check marks not updating when transparency setting changes. Added OpacityChanged event subscription in TrayManager. Also committed the full opacity feature: AppSettings opacity property with persistence, tray opacity submenu, StatusWindow reactive opacity, and localization strings.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `68a8b5b` | (see git log) |
+| `64a04cc` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

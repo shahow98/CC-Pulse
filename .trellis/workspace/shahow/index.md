@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 18
-- **Last Active**: 2026-07-20
+- **Total Sessions**: 19
+- **Last Active**: 2026-07-27
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~604 | Active |
+| `journal-1.md` | ~638 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 19 | 2026-07-27 | Fix opacity check marks not updating in tray menu | `68a8b5b`, `64a04cc` | `main` |
 | 18 | 2026-07-20 | Hide CC-Pulse from Alt+Tab | `b4295e8` | `main` |
 | 17 | 2026-07-20 | Simplify traffic light to red/green | `926d198` | `main` |
 | 16 | 2026-07-20 | Fix traffic light stuck yellow on Ctrl+C/ESC interrupt | `ff471f8` | `main` |
