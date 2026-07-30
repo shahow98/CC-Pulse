@@ -670,3 +670,36 @@ Fixed tray menu opacity check marks not updating when transparency setting chang
 ### Next Steps
 
 - None - task complete
+
+
+## Session 21: Subagent filesystem watcher with per-subagent named rows
+
+**Date**: 2026-07-31
+**Task**: Subagent filesystem watcher with per-subagent named rows
+**Branch**: `feat/subagent-watcher`
+
+### Summary
+
+Added SubagentWatcher, a polling service that scans each session's subagents/ directory to detect subagent activity authoritatively (fixing hook gaps: 'Task' tool name and unreliable SubagentStop). Judges liveness by jsonl mtime, reads meta.json for agentType/description, and shows each active subagent as its own named row. Hook path retained for instant feedback; watcher reconciles every 4s; 120s watchdog kept as fallback.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `7dc0e86` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
