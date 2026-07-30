@@ -48,42 +48,42 @@
                 <!-- Main agent row -->
                 <Grid>
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="10" />
+                        <ColumnDefinition Width="14" />
                         <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
 
                     <!-- Main agent indicator (red=Busy, green=Idle) -->
                     <Ellipse Grid.Column="0"
-                             Width="6" Height="6"
+                             Width="8" Height="8"
                              Fill="{Binding IsWorking, Converter={StaticResource StatusToColorConverter}}"
                              VerticalAlignment="Center"
                              Margin="0,0,4,0" />
 
                     <TextBlock Grid.Column="1"
                                Text="{Binding Status, Converter={StaticResource MainStatusToTextConverter}}"
-                               Foreground="#FFA0A0A0"
-                               FontSize="10"
+                               Foreground="{Binding IsWorking, Converter={StaticResource StatusToColorConverter}}"
+                               FontSize="11"
                                VerticalAlignment="Center" />
                 </Grid>
 
                 <!-- Subagent row (only while a subagent is active) -->
                 <Grid Visibility="{Binding SubagentActive, Converter={StaticResource BooleanToVisibilityConverter}}">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="10" />
+                        <ColumnDefinition Width="14" />
                         <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
 
                     <!-- Subagent indicator (red=Working; row hidden when inactive) -->
                     <Ellipse Grid.Column="0"
-                             Width="6" Height="6"
+                             Width="8" Height="8"
                              Fill="{Binding SubagentWorking, Converter={StaticResource StatusToColorConverter}}"
                              VerticalAlignment="Center"
                              Margin="0,0,4,0" />
 
                     <TextBlock Grid.Column="1"
                                Text="{Binding SubagentActive, Converter={StaticResource SubagentStatusToTextConverter}}"
-                               Foreground="#FFCBA6F7"
-                               FontSize="10"
+                               Foreground="{Binding SubagentWorking, Converter={StaticResource StatusToColorConverter}}"
+                               FontSize="11"
                                VerticalAlignment="Center" />
                 </Grid>
             </StackPanel>
