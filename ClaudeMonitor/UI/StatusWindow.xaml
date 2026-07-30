@@ -18,6 +18,9 @@
         <!-- Status to color converter -->
         <ui:StatusToColorConverter x:Key="StatusToColorConverter" />
         <ui:StatusToTextConverter x:Key="StatusToTextConverter" />
+        <ui:MainStatusToTextConverter x:Key="MainStatusToTextConverter" />
+        <ui:SubagentStatusToTextConverter x:Key="SubagentStatusToTextConverter" />
+        <ui:BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
 
         <!-- Drop shadow border style -->
         <Style x:Key="CardBorder" TargetType="Border">
@@ -33,33 +36,57 @@
 
         <!-- Session item template -->
         <DataTemplate DataType="{x:Type models:SessionInfo}">
-            <Grid Margin="0,4">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="20" />
-                    <ColumnDefinition Width="*" />
-                </Grid.ColumnDefinitions>
+            <StackPanel Margin="0,4">
+                <!-- Project name (no indicator) -->
+                <TextBlock Text="{Binding DisplayName}"
+                           Foreground="#FFE0E0E0"
+                           FontSize="12"
+                           FontWeight="Medium"
+                           TextTrimming="CharacterEllipsis"
+                           Margin="0,0,0,2" />
 
-                <!-- Status indicator circle -->
-                <Ellipse Grid.Column="0"
-                         Width="14" Height="14"
-                         Fill="{Binding Status, Converter={StaticResource StatusToColorConverter}}"
-                         Stroke="#40FFFFFF"
-                         StrokeThickness="1"
-                         VerticalAlignment="Center"
-                         Margin="0,0,4,0" />
+                <!-- Main agent row -->
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="10" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
 
-                <!-- Session info -->
-                <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                    <TextBlock Text="{Binding DisplayName}"
-                               Foreground="#FFE0E0E0"
-                               FontSize="12"
-                               FontWeight="Medium"
-                               TextTrimming="CharacterEllipsis" />
-                    <TextBlock Text="{Binding Status, Converter={StaticResource StatusToTextConverter}}"
+                    <!-- Main agent indicator (red=Busy, green=Idle) -->
+                    <Ellipse Grid.Column="0"
+                             Width="6" Height="6"
+                             Fill="{Binding IsWorking, Converter={StaticResource StatusToColorConverter}}"
+                             VerticalAlignment="Center"
+                             Margin="0,0,4,0" />
+
+                    <TextBlock Grid.Column="1"
+                               Text="{Binding Status, Converter={StaticResource MainStatusToTextConverter}}"
                                Foreground="#FFA0A0A0"
-                               FontSize="10" />
-                </StackPanel>
-            </Grid>
+                               FontSize="10"
+                               VerticalAlignment="Center" />
+                </Grid>
+
+                <!-- Subagent row (only while a subagent is active) -->
+                <Grid Visibility="{Binding SubagentActive, Converter={StaticResource BooleanToVisibilityConverter}}">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="10" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+
+                    <!-- Subagent indicator (red=Working; row hidden when inactive) -->
+                    <Ellipse Grid.Column="0"
+                             Width="6" Height="6"
+                             Fill="{Binding SubagentWorking, Converter={StaticResource StatusToColorConverter}}"
+                             VerticalAlignment="Center"
+                             Margin="0,0,4,0" />
+
+                    <TextBlock Grid.Column="1"
+                               Text="{Binding SubagentActive, Converter={StaticResource SubagentStatusToTextConverter}}"
+                               Foreground="#FFCBA6F7"
+                               FontSize="10"
+                               VerticalAlignment="Center" />
+                </Grid>
+            </StackPanel>
         </DataTemplate>
     </Window.Resources>
 

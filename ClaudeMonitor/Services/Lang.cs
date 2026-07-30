@@ -17,6 +17,13 @@ public static class Lang
         ["StatusBusy"] = "Working…",
         ["StatusUnknown"] = "Unknown",
 
+        // Agent labels (main vs subagent)
+        ["MainAgentLabel"] = "main",
+        ["SubagentLabel"] = "subagent",
+        ["StatusMainIdle"] = "main  Idle",
+        ["StatusMainBusy"] = "main  Working…",
+        ["StatusSubagentBusy"] = "subagent  Working…",
+
         // Status window
         ["NoActiveSessions"] = "No active sessions",
 
@@ -57,6 +64,13 @@ public static class Lang
         ["StatusIdle"] = "空闲",
         ["StatusBusy"] = "工作中…",
         ["StatusUnknown"] = "未知",
+
+        // Agent labels (main vs subagent)
+        ["MainAgentLabel"] = "main",
+        ["SubagentLabel"] = "subagent",
+        ["StatusMainIdle"] = "main  空闲",
+        ["StatusMainBusy"] = "main  工作中…",
+        ["StatusSubagentBusy"] = "subagent  工作中…",
 
         // Status window
         ["NoActiveSessions"] = "无活动会话",
