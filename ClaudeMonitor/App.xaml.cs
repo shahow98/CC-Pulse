@@ -23,6 +23,7 @@ public partial class App : System.Windows.Application
     private HookServer? _hookServer;
     private TrayManager? _trayManager;
     private StatusWindow? _statusWindow;
+    private SubagentWatcher? _subagentWatcher;
 
     private static readonly string ClaudeDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
@@ -68,6 +69,14 @@ public partial class App : System.Windows.Application
         _hookServer = new HookServer(_sessionManager);
         _trayManager = new TrayManager(_sessionManager);
         _statusWindow = new StatusWindow(_sessionManager);
+
+        // SubagentWatcher scans each session's subagents/ directory on disk to
+        // detect subagent activity authoritatively (the hook path misses
+        // subagents when the spawning tool is named "Task" and its SubagentStop
+        // event is unreliable). It reconciles with the hook signals every poll.
+        _subagentWatcher = new SubagentWatcher(_sessionManager);
+        _sessionManager.SetSubagentWatcher(_subagentWatcher);
+        _subagentWatcher.Start();
 
         // Wire up tray events
         _trayManager.ExitRequested += OnExitRequested;
@@ -270,6 +279,7 @@ public partial class App : System.Windows.Application
     {
         // Clean up resources in reverse order
         _hookServer?.Dispose();
+        _subagentWatcher?.Dispose();
         _trayManager?.Dispose();
         _sessionManager?.Dispose();
         AppSettings.Instance.Dispose();

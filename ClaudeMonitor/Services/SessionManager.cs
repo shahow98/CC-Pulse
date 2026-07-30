@@ -39,6 +39,13 @@ public class SessionManager : IDisposable
     private readonly ConcurrentDictionary<string, System.Threading.Timer> _busyTimers = new();
     private readonly ConcurrentDictionary<string, System.Threading.Timer> _subagentTimers = new();
 
+    /// <summary>
+    /// Filesystem watcher that authoritatively detects subagent activity by
+    /// scanning each session's subagents/ directory. May be null when the
+    /// SessionManager is used standalone (e.g. CLI). Set by the app at startup.
+    /// </summary>
+    private SubagentWatcher? _subagentWatcher;
+
     /// <summary>Raised when any session's status changes.</summary>
     public event EventHandler<SessionStatusChangedEventArgs>? StatusChanged;
 
@@ -50,6 +57,16 @@ public class SessionManager : IDisposable
 
     /// <summary>Gets the number of active sessions.</summary>
     public int SessionCount => _sessions.Count;
+
+    /// <summary>
+    /// Attach the filesystem-based subagent watcher. The watcher is started by
+    /// the caller; this only stores the reference so AddSession/RemoveSession
+    /// can register/unregister sessions with it.
+    /// </summary>
+    public void SetSubagentWatcher(SubagentWatcher watcher)
+    {
+        _subagentWatcher = watcher;
+    }
 
     /// <summary>
     /// Gets the aggregate (worst) status across all sessions.
@@ -95,6 +112,10 @@ public class SessionManager : IDisposable
         });
 
         SessionsChanged?.Invoke(this, EventArgs.Empty);
+
+        // Register with the subagent watcher so this session's subagents/
+        // directory is polled for subagent activity.
+        _subagentWatcher?.RegisterSession(sessionId, projectPath);
     }
 
     /// <summary>Update a session's status.</summary>
@@ -215,11 +236,91 @@ public class SessionManager : IDisposable
         SessionsChanged?.Invoke(this, EventArgs.Empty);
     }
 
+    /// <summary>
+    /// Replace a session's active subagent list with the given set. Called
+    /// authoritatively by <see cref="SubagentWatcher"/> after each poll.
+    /// Reconciles the <see cref="SessionInfo.Subagents"/> collection in place
+    /// (add new, remove gone, update changed) so the UI rows stay stable.
+    /// Also manages the subagent watchdog: active → start/reset, empty → stop.
+    /// </summary>
+    public void UpdateSubagents(string sessionId, IReadOnlyList<SubagentInfo> activeSubagents)
+    {
+        if (!_sessions.TryGetValue(sessionId, out var session)) return;
+
+        var count = activeSubagents.Count;
+
+        // Reconcile the observable collection in place to preserve row order
+        // and avoid full-list flicker. Hold the session's subagents lock so
+        // WPF (which acquires the same lock via EnableCollectionSynchronization)
+        // sees a consistent view.
+        var current = session.Subagents;
+        lock (session.SubagentsLock)
+        {
+            // Remove extras
+            while (current.Count > count)
+                current.RemoveAt(current.Count - 1);
+            // Add or update
+            for (int i = 0; i < count; i++)
+            {
+                var src = activeSubagents[i];
+                if (i < current.Count)
+                {
+                    var dst = current[i];
+                    if (dst.AgentId != src.AgentId) dst.AgentId = src.AgentId;
+                    if (dst.AgentType != src.AgentType) dst.AgentType = src.AgentType;
+                    if (dst.Description != src.Description) dst.Description = src.Description;
+                    if (dst.DisplayName != src.DisplayName) dst.DisplayName = src.DisplayName;
+                }
+                else
+                {
+                    current.Add(new SubagentInfo
+                    {
+                        AgentId = src.AgentId,
+                        AgentType = src.AgentType,
+                        Description = src.Description,
+                        DisplayName = src.DisplayName,
+                    });
+                }
+            }
+        }
+
+        // Clear the hook-set flag when the watcher sees no active subagents,
+        // so SubagentActive reflects reality (not a stale hook signal).
+        if (count == 0 && session.SubagentActive)
+        {
+            session.SubagentActive = false;
+        }
+
+        // Manage the watchdog based on watcher state.
+        if (count > 0)
+        {
+            StartOrResetSubagentTimer(sessionId);
+        }
+        else
+        {
+            StopSubagentTimer(sessionId);
+        }
+
+        session.LastUpdated = DateTime.Now;
+
+        StatusChanged?.Invoke(this, new SessionStatusChangedEventArgs
+        {
+            SessionId = sessionId,
+            OldStatus = session.Status,
+            NewStatus = session.Status,
+            Session = session,
+            SubagentChanged = true
+        });
+
+        SessionsChanged?.Invoke(this, EventArgs.Empty);
+    }
+
     /// <summary>Remove a session (session ended).</summary>
     public void RemoveSession(string sessionId)
     {
         StopBusyTimer(sessionId);
         StopSubagentTimer(sessionId);
+        _subagentWatcher?.UnregisterSession(sessionId);
 
         if (_sessions.TryRemove(sessionId, out var session))
         {

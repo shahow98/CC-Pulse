@@ -1,6 +1,8 @@
 using System;
+using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using System.Windows.Data;
 
 namespace ClaudeMonitor.Models;
 
@@ -30,6 +32,45 @@ public class SessionInfo : INotifyPropertyChanged
     private bool _subagentActive;
     private string _subagentDescription = string.Empty;
     private bool _isWorking;
+
+    /// <summary>
+    /// The list of currently active subagents for this session, each shown as
+    /// its own row in the status window. Populated authoritatively by
+    /// <see cref="Services.SubagentWatcher"/>; the hook path may also set
+    /// <see cref="SubagentActive"/> for instant feedback before the watcher
+    /// reconciles.
+    /// </summary>
+    public ObservableCollection<SubagentInfo> Subagents { get; } = new();
+
+    /// <summary>
+    /// Lock object used with <see cref="BindingOperations.EnableCollectionSynchronization"/>
+    /// so the Subagents collection can be safely modified by the SubagentWatcher
+    /// (background thread) while WPF binds to it on the UI thread.
+    /// </summary>
+    private readonly object _subagentsLock = new();
+
+    /// <summary>Lock for thread-safe mutation of <see cref="Subagents"/>.</summary>
+    internal object SubagentsLock => _subagentsLock;
+
+    public SessionInfo()
+    {
+        // Allow cross-thread mutation of Subagents: WPF will acquire this lock
+        // when raising CollectionChanged on the UI thread, and the watcher
+        // acquires it when mutating. PropertyChanged notifications below still
+        // need to fire; EnableCollectionSynchronization handles the collection
+        // access, and INotifyPropertyChanged marshals to the UI thread by WPF.
+        BindingOperations.EnableCollectionSynchronization(Subagents, _subagentsLock);
+
+        // When the watcher adds/removes subagents, re-notify the derived
+        // SubagentActive/SubagentWorking bindings so the row visibility and
+        // indicator color update.
+        Subagents.CollectionChanged += (_, _) =>
+        {
+            OnPropertyChanged(nameof(SubagentActive));
+            OnPropertyChanged(nameof(SubagentWorking));
+            RefreshIsWorking();
+        };
+    }
 
     /// <summary>Unique session identifier from Claude Code.</summary>
     public string SessionId
@@ -71,13 +112,15 @@ public class SessionInfo : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// True when a subagent (spawned via the Agent tool) is currently running
-    /// in this session. While active, the main agent is waiting, so the main
+    /// True when a subagent (spawned via the Agent/Task tool) is currently
+    /// running in this session. Reflects both the hook-set flag (instant
+    /// feedback) and the watcher-populated <see cref="Subagents"/> collection
+    /// (authoritative). While active, the main agent is waiting, so the main
     /// status shows Idle and a separate subagent row shows Working.
     /// </summary>
     public bool SubagentActive
     {
-        get => _subagentActive;
+        get => _subagentActive || Subagents.Count > 0;
         set
         {
             if (SetField(ref _subagentActive, value))
@@ -118,7 +161,7 @@ public class SessionInfo : INotifyPropertyChanged
     /// circle (red while the subagent works; the whole subagent row is hidden
     /// when false, so the green state is never visible).
     /// </summary>
-    public bool SubagentWorking => _subagentActive;
+    public bool SubagentWorking => SubagentActive;
 
     /// <summary>Recompute IsWorking from main Status only.</summary>
     private void RefreshIsWorking()

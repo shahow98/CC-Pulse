@@ -20,6 +20,7 @@
         <ui:StatusToTextConverter x:Key="StatusToTextConverter" />
         <ui:MainStatusToTextConverter x:Key="MainStatusToTextConverter" />
         <ui:SubagentStatusToTextConverter x:Key="SubagentStatusToTextConverter" />
+        <ui:SubagentColorConverter x:Key="SubagentColorConverter" />
         <ui:BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
 
         <!-- Drop shadow border style -->
@@ -66,26 +67,34 @@
                                VerticalAlignment="Center" />
                 </Grid>
 
-                <!-- Subagent row (only while a subagent is active) -->
-                <Grid Visibility="{Binding SubagentActive, Converter={StaticResource BooleanToVisibilityConverter}}">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="14" />
-                        <ColumnDefinition Width="*" />
-                    </Grid.ColumnDefinitions>
+                <!-- Subagent rows (one per active subagent; hidden when none active) -->
+                <ItemsControl ItemsSource="{Binding Subagents}"
+                              Visibility="{Binding SubagentActive, Converter={StaticResource BooleanToVisibilityConverter}}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate DataType="{x:Type models:SubagentInfo}">
+                            <Grid Margin="0,1,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="14" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
 
-                    <!-- Subagent indicator (red=Working; row hidden when inactive) -->
-                    <Ellipse Grid.Column="0"
-                             Width="8" Height="8"
-                             Fill="{Binding SubagentWorking, Converter={StaticResource StatusToColorConverter}}"
-                             VerticalAlignment="Center"
-                             Margin="0,0,4,0" />
+                                <!-- Subagent indicator (red=Working) -->
+                                <Ellipse Grid.Column="0"
+                                         Width="8" Height="8"
+                                         Fill="{Binding Converter={StaticResource SubagentColorConverter}}"
+                                         VerticalAlignment="Center"
+                                         Margin="0,0,4,0" />
 
-                    <TextBlock Grid.Column="1"
-                               Text="{Binding SubagentActive, Converter={StaticResource SubagentStatusToTextConverter}}"
-                               Foreground="{Binding SubagentWorking, Converter={StaticResource StatusToColorConverter}}"
-                               FontSize="11"
-                               VerticalAlignment="Center" />
-                </Grid>
+                                <TextBlock Grid.Column="1"
+                                           Text="{Binding DisplayName, Converter={StaticResource SubagentStatusToTextConverter}}"
+                                           Foreground="{Binding Converter={StaticResource SubagentColorConverter}}"
+                                           FontSize="11"
+                                           VerticalAlignment="Center"
+                                           TextTrimming="CharacterEllipsis" />
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
             </StackPanel>
         </DataTemplate>
     </Window.Resources>

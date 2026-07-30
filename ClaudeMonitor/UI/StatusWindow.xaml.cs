@@ -288,19 +288,40 @@ public class MainStatusToTextConverter : IValueConverter
 }
 
 /// <summary>
-/// Converts the SubagentActive flag to a labeled text string. Returns the
-/// subagent working text when active, empty otherwise (the row's Visibility
-/// is controlled separately by BooleanToVisibilityConverter).
+/// Converts a subagent's display name (from SubagentInfo.DisplayName) to a
+/// labeled text string: "subagent · {name} · Working…". Falls back to the
+/// plain subagent working text when no name is available.
 /// </summary>
 public class SubagentStatusToTextConverter : IValueConverter
 {
     public object Convert(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
     {
-        if (value is bool active && active)
+        // value is the SubagentInfo.DisplayName string (bound via {Binding DisplayName}).
+        if (value is string name && !string.IsNullOrWhiteSpace(name))
         {
-            return Lang.Get("StatusSubagentBusy");
+            return Lang.Get("StatusSubagentBusyNamed", name);
         }
-        return string.Empty;
+        return Lang.Get("StatusSubagentBusy");
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
+    {
+        throw new NotImplementedException();
+    }
+}
+
+/// <summary>
+/// Returns the brush for a subagent row. Subagent rows are only visible while
+/// the subagent is working, so this always returns the red (working) brush.
+/// Bound to the SubagentInfo object itself (no path).
+/// </summary>
+public class SubagentColorConverter : IValueConverter
+{
+    private static readonly SolidColorBrush RedBrush = new(System.Windows.Media.Color.FromRgb(231, 76, 60));
+
+    public object Convert(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
+    {
+        return RedBrush;
     }
 
     public object ConvertBack(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
