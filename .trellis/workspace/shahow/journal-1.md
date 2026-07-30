@@ -636,3 +636,37 @@ Fixed tray menu opacity check marks not updating when transparency setting chang
 ### Next Steps
 
 - None - task complete
+
+
+## Session 20: 信号灯布局重构 + subagent 检测
+
+**Date**: 2026-07-30
+**Task**: 信号灯布局重构 + subagent 检测
+**Branch**: `feat/traffic-light-layout`
+
+### Summary
+
+重构信号灯布局为 project name + main/subagent 双行，缩小圆点避免视觉错位，状态文字改为固定标签+状态格式；实现 subagent 活动检测（hook 层转发 tool_name、SubagentStop hook、SessionInfo/SessionManager 状态管理、UI converter），subagent 激活时单独显示一行指示。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `a13a147` | (see git log) |
+| `399ea05` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

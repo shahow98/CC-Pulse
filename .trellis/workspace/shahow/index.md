@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 19
-- **Last Active**: 2026-07-27
+- **Total Sessions**: 20
+- **Last Active**: 2026-07-30
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~638 | Active |
+| `journal-1.md` | ~672 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 20 | 2026-07-30 | 信号灯布局重构 + subagent 检测 | `a13a147`, `399ea05` | `feat/traffic-light-layout` |
 | 19 | 2026-07-27 | Fix opacity check marks not updating in tray menu | `68a8b5b`, `64a04cc` | `main` |
 | 18 | 2026-07-20 | Hide CC-Pulse from Alt+Tab | `b4295e8` | `main` |
 | 17 | 2026-07-20 | Simplify traffic light to red/green | `926d198` | `main` |
