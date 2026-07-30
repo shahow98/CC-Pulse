@@ -44,6 +44,14 @@ public static class HookConfigurator
     private static readonly (string Matcher, string Suffix)[] StopFailureHooks =
         [("", "idle")];
 
+    /// <summary>
+    /// SubagentStop fires when a subagent (spawned via the Agent tool) finishes.
+    /// Used to clear the subagent-active indicator. Note: this event is not
+    /// fired in all modes, so the SessionManager also has a watchdog fallback.
+    /// </summary>
+    private static readonly (string Matcher, string Suffix)[] SubagentStopHooks =
+        [("", "subagent-stop")];
+
     private static readonly (string Matcher, string Suffix)[] SessionEndHooks =
         [("", "end")];
 
@@ -56,6 +64,7 @@ public static class HookConfigurator
         ["Notification"] = NotificationHooks,
         ["Stop"] = StopHooks,
         ["StopFailure"] = StopFailureHooks,
+        ["SubagentStop"] = SubagentStopHooks,
         ["SessionEnd"] = SessionEndHooks,
     };
 
@@ -270,6 +279,57 @@ public static class HookConfigurator
             }
 
             return true; // No CC-Pulse hook found in StopFailure
+        }
+        catch
+        {
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Check whether CC-Pulse is missing the SubagentStop hook.
+    /// SubagentStop fires when a subagent (spawned via the Agent tool) finishes.
+    /// Without this hook, the subagent-active indicator relies solely on the
+    /// watchdog timeout and main-agent-resume heuristics to clear.
+    /// Returns true if no SubagentStop CC-Pulse hook is configured.
+    /// </summary>
+    public static bool UsesMissingSubagentStop()
+    {
+        try
+        {
+            if (!File.Exists(SettingsPath))
+                return true;
+
+            var json = File.ReadAllText(SettingsPath);
+            var settings = JsonNode.Parse(json)?.AsObject();
+            if (settings is null) return true;
+
+            if (!settings.ContainsKey("hooks"))
+                return true;
+
+            var hooks = settings["hooks"]!.AsObject();
+
+            if (!hooks.ContainsKey("SubagentStop"))
+                return true;
+
+            var subagentStopArray = hooks["SubagentStop"]?.AsArray();
+            if (subagentStopArray is null) return true;
+
+            foreach (var entry in subagentStopArray)
+            {
+                var entryHooks = entry?["hooks"]?.AsArray();
+                if (entryHooks is null) continue;
+
+                foreach (var h in entryHooks)
+                {
+                    var cmd = h?["command"]?.GetValue<string>() ?? "";
+                    if (cmd.Contains("cc-pulse-hook") || cmd.Contains("ClaudeMonitor")
+                                || cmd.Contains("CC-Pulse-Hook"))
+                        return false; // Found a CC-Pulse SubagentStop hook
+                }
+            }
+
+            return true; // No CC-Pulse hook found in SubagentStop
         }
         catch
         {

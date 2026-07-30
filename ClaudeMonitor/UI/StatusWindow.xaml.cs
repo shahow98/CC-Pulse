@@ -95,6 +95,8 @@ public partial class StatusWindow : Window
             {
                 existing.Status = e.NewStatus;
                 existing.LastUpdated = e.Session.LastUpdated;
+                existing.SubagentActive = e.Session.SubagentActive;
+                existing.SubagentDescription = e.Session.SubagentDescription;
             }
         });
     }
@@ -128,6 +130,8 @@ public partial class StatusWindow : Window
                     existing.LastUpdated = session.LastUpdated;
                     existing.DisplayName = session.DisplayName;
                     existing.ProjectPath = session.ProjectPath;
+                    existing.SubagentActive = session.SubagentActive;
+                    existing.SubagentDescription = session.SubagentDescription;
                 }
             }
 
@@ -208,7 +212,7 @@ public partial class StatusWindow : Window
     }
 }
 
-/// <summary>Converts SessionStatus to a Brush color for the indicator circle.</summary>
+/// <summary>Converts the IsWorking flag to a Brush color for the indicator circle.</summary>
 public class StatusToColorConverter : IValueConverter
 {
     private static readonly SolidColorBrush GreenBrush = new(System.Windows.Media.Color.FromRgb(46, 204, 113));
@@ -216,13 +220,15 @@ public class StatusToColorConverter : IValueConverter
 
     public object Convert(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
     {
+        // IsWorking (bool) — true means red (something is working)
+        if (value is bool isWorking)
+        {
+            return isWorking ? RedBrush : GreenBrush;
+        }
+        // Backward compat: SessionStatus still accepted
         if (value is SessionStatus status)
         {
-            return status switch
-            {
-                SessionStatus.Busy => RedBrush,
-                _ => GreenBrush
-            };
+            return status == SessionStatus.Busy ? RedBrush : GreenBrush;
         }
         return GreenBrush;
     }
@@ -248,6 +254,71 @@ public class StatusToTextConverter : IValueConverter
             };
         }
         return Lang.Get("StatusUnknown");
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
+    {
+        throw new NotImplementedException();
+    }
+}
+
+/// <summary>
+/// Converts the main agent's SessionStatus to a labeled text string
+/// ("main · Idle" / "main · Working…"). Used for the main status row.
+/// </summary>
+public class MainStatusToTextConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
+    {
+        if (value is SessionStatus status)
+        {
+            return status switch
+            {
+                SessionStatus.Busy => Lang.Get("StatusMainBusy"),
+                _ => Lang.Get("StatusMainIdle")
+            };
+        }
+        return Lang.Get("StatusMainIdle");
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
+    {
+        throw new NotImplementedException();
+    }
+}
+
+/// <summary>
+/// Converts the SubagentActive flag to a labeled text string. Returns the
+/// subagent working text when active, empty otherwise (the row's Visibility
+/// is controlled separately by BooleanToVisibilityConverter).
+/// </summary>
+public class SubagentStatusToTextConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
+    {
+        if (value is bool active && active)
+        {
+            return Lang.Get("StatusSubagentBusy");
+        }
+        return string.Empty;
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
+    {
+        throw new NotImplementedException();
+    }
+}
+
+/// <summary>Converts a bool to Visibility (true → Visible, false → Collapsed).</summary>
+public class BooleanToVisibilityConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
+    {
+        if (value is bool b)
+        {
+            return b ? Visibility.Visible : Visibility.Collapsed;
+        }
+        return Visibility.Collapsed;
     }
 
     public object ConvertBack(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)

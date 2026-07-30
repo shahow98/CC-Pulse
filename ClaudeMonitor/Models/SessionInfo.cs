@@ -27,6 +27,9 @@ public class SessionInfo : INotifyPropertyChanged
     private DateTime _lastUpdated = DateTime.Now;
     private string _projectPath = string.Empty;
     private string _displayName = string.Empty;
+    private bool _subagentActive;
+    private string _subagentDescription = string.Empty;
+    private bool _isWorking;
 
     /// <summary>Unique session identifier from Claude Code.</summary>
     public string SessionId
@@ -39,7 +42,11 @@ public class SessionInfo : INotifyPropertyChanged
     public SessionStatus Status
     {
         get => _status;
-        set => SetField(ref _status, value);
+        set
+        {
+            if (SetField(ref _status, value))
+                RefreshIsWorking();
+        }
     }
 
     /// <summary>Timestamp of the last status update.</summary>
@@ -61,6 +68,62 @@ public class SessionInfo : INotifyPropertyChanged
     {
         get => _displayName;
         set => SetField(ref _displayName, value);
+    }
+
+    /// <summary>
+    /// True when a subagent (spawned via the Agent tool) is currently running
+    /// in this session. While active, the main agent is waiting, so the main
+    /// status shows Idle and a separate subagent row shows Working.
+    /// </summary>
+    public bool SubagentActive
+    {
+        get => _subagentActive;
+        set
+        {
+            if (SetField(ref _subagentActive, value))
+            {
+                // SubagentWorking derives from SubagentActive, notify its binding
+                OnPropertyChanged(nameof(SubagentWorking));
+                RefreshIsWorking();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Description of the active subagent task (from the Agent tool's
+    /// description field), shown in the subagent status row. Empty when no
+    /// subagent is active.
+    /// </summary>
+    public string SubagentDescription
+    {
+        get => _subagentDescription;
+        set => SetField(ref _subagentDescription, value);
+    }
+
+    /// <summary>
+    /// True when the main agent is Busy. Binds the main-agent indicator circle
+    /// so it reflects only the main agent's state (red while the main agent
+    /// works, green while idle — including when a subagent is running and the
+    /// main agent is waiting). The subagent has its own indicator bound to
+    /// <see cref="SubagentWorking"/>.
+    /// </summary>
+    public bool IsWorking
+    {
+        get => _isWorking;
+        private set => SetField(ref _isWorking, value);
+    }
+
+    /// <summary>
+    /// True when a subagent is currently running. Binds the subagent indicator
+    /// circle (red while the subagent works; the whole subagent row is hidden
+    /// when false, so the green state is never visible).
+    /// </summary>
+    public bool SubagentWorking => _subagentActive;
+
+    /// <summary>Recompute IsWorking from main Status only.</summary>
+    private void RefreshIsWorking()
+    {
+        IsWorking = _status == SessionStatus.Busy;
     }
 
     /// <summary>
@@ -109,4 +172,11 @@ public class SessionStatusChangedEventArgs : EventArgs
     public SessionStatus OldStatus { get; init; }
     public SessionStatus NewStatus { get; init; }
     public SessionInfo Session { get; init; } = null!;
+
+    /// <summary>
+    /// True when this event represents a subagent-active flag change rather
+    /// than (or in addition to) a main status change. UI handlers use this to
+    /// know they must refresh the subagent row.
+    /// </summary>
+    public bool SubagentChanged { get; init; }
 }

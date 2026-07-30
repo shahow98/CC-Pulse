@@ -35,6 +35,7 @@ public static class HookRunner
 
             var sessionId = "";
             var projectPath = "";
+            var toolName = "";
 
             if (!string.IsNullOrEmpty(input))
             {
@@ -45,6 +46,8 @@ public static class HookRunner
                         sessionId = sidProp.GetString() ?? "";
                     if (doc.RootElement.TryGetProperty("cwd", out var cwdProp))
                         projectPath = cwdProp.GetString() ?? "";
+                    if (doc.RootElement.TryGetProperty("tool_name", out var tnProp))
+                        toolName = tnProp.GetString() ?? "";
                 }
                 catch (JsonException)
                 {
@@ -71,6 +74,8 @@ public static class HookRunner
             };
             if (!string.IsNullOrEmpty(projectPath))
                 payload["projectPath"] = projectPath;
+            if (!string.IsNullOrEmpty(toolName))
+                payload["toolName"] = toolName;
 
             var json = JsonSerializer.Serialize(payload);
             var content = new StringContent(json, Encoding.UTF8, "application/json");

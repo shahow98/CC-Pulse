@@ -25,8 +25,19 @@ public class SessionManager : IDisposable
     /// </summary>
     private const int BusyTimeoutSeconds = 60;
 
+    /// <summary>
+    /// Timeout after which a subagent-active flag is automatically cleared.
+    /// SubagentStop is not reliably fired by Claude Code, so this watchdog
+    /// ensures the subagent row eventually disappears. The timer is reset on
+    /// any main-session activity (the main agent resuming work implies the
+    /// subagent has returned). Longer than the busy timeout because subagents
+    /// often run longer than a single tool call.
+    /// </summary>
+    private const int SubagentTimeoutSeconds = 120;
+
     private readonly ConcurrentDictionary<string, SessionInfo> _sessions = new();
     private readonly ConcurrentDictionary<string, System.Threading.Timer> _busyTimers = new();
+    private readonly ConcurrentDictionary<string, System.Threading.Timer> _subagentTimers = new();
 
     /// <summary>Raised when any session's status changes.</summary>
     public event EventHandler<SessionStatusChangedEventArgs>? StatusChanged;
@@ -122,19 +133,93 @@ public class SessionManager : IDisposable
     /// Reset the busy watchdog timer for a session without changing its status.
     /// Called on every activity hook (PreToolUse, PostToolUse, UserPromptSubmit)
     /// to keep the timer alive while Claude Code is actively working.
+    /// Also resets the subagent watchdog when a subagent is active, since any
+    /// main-session activity implies the subagent is still relevant (or has
+    /// just returned and will be cleared by the caller).
     /// </summary>
     public void ResetBusyTimeout(string sessionId)
     {
-        if (_sessions.TryGetValue(sessionId, out var session) && session.Status == SessionStatus.Busy)
+        if (!_sessions.TryGetValue(sessionId, out var session)) return;
+
+        if (session.Status == SessionStatus.Busy)
         {
             StartOrResetBusyTimer(sessionId);
         }
+
+        if (session.SubagentActive)
+        {
+            StartOrResetSubagentTimer(sessionId);
+        }
+    }
+
+    /// <summary>
+    /// Set the subagent-active flag for a session. Called when the main agent
+    /// invokes the Agent tool (subagent started) or when the subagent is
+    /// detected as finished (SubagentStop, main agent resuming, Stop, or
+    /// watchdog timeout).
+    ///
+    /// When a subagent becomes active, the main status is set to Idle (the
+    /// main agent is waiting) and the subagent watchdog is started. When it is
+    /// cleared, the watchdog is stopped; the main status is left as-is so the
+    /// caller's subsequent UpdateStatus call (or the existing Idle) applies.
+    /// </summary>
+    public void SetSubagentActive(string sessionId, bool active, string description = "")
+    {
+        if (!_sessions.TryGetValue(sessionId, out var session)) return;
+
+        var wasActive = session.SubagentActive;
+        if (wasActive == active && active)
+        {
+            // Already active — just refresh description and reset watchdog
+            session.SubagentDescription = description;
+            StartOrResetSubagentTimer(sessionId);
+            return;
+        }
+        if (wasActive == active && !active) return; // already inactive, nothing to do
+
+        session.SubagentActive = active;
+        session.SubagentDescription = active ? description : string.Empty;
+        session.LastUpdated = DateTime.Now;
+
+        if (active)
+        {
+            // Main agent is now waiting for the subagent → show Idle
+            var oldStatus = session.Status;
+            session.Status = SessionStatus.Idle;
+            StopBusyTimer(sessionId);
+            StartOrResetSubagentTimer(sessionId);
+
+            StatusChanged?.Invoke(this, new SessionStatusChangedEventArgs
+            {
+                SessionId = sessionId,
+                OldStatus = oldStatus,
+                NewStatus = SessionStatus.Idle,
+                Session = session,
+                SubagentChanged = true
+            });
+        }
+        else
+        {
+            StopSubagentTimer(sessionId);
+
+            StatusChanged?.Invoke(this, new SessionStatusChangedEventArgs
+            {
+                SessionId = sessionId,
+                OldStatus = session.Status,
+                NewStatus = session.Status,
+                Session = session,
+                SubagentChanged = true
+            });
+        }
+
+        SessionsChanged?.Invoke(this, EventArgs.Empty);
     }
 
     /// <summary>Remove a session (session ended).</summary>
     public void RemoveSession(string sessionId)
     {
         StopBusyTimer(sessionId);
+        StopSubagentTimer(sessionId);
 
         if (_sessions.TryRemove(sessionId, out var session))
         {
@@ -178,12 +263,43 @@ public class SessionManager : IDisposable
         }
     }
 
+    /// <summary>
+    /// Start or reset the subagent watchdog timer. If it expires, the
+    /// subagent-active flag is cleared (SubagentStop is not reliably fired).
+    /// </summary>
+    private void StartOrResetSubagentTimer(string sessionId)
+    {
+        var timer = new System.Threading.Timer(_ =>
+        {
+            // No activity for the timeout — clear the subagent flag
+            SetSubagentActive(sessionId, false);
+        }, null, TimeSpan.FromSeconds(SubagentTimeoutSeconds), Timeout.InfiniteTimeSpan);
+
+        var oldTimer = _subagentTimers.GetValueOrDefault(sessionId);
+        _subagentTimers[sessionId] = timer;
+
+        oldTimer?.Dispose();
+    }
+
+    /// <summary>Stop and dispose the subagent watchdog timer for a session.</summary>
+    private void StopSubagentTimer(string sessionId)
+    {
+        if (_subagentTimers.TryRemove(sessionId, out var timer))
+        {
+            timer.Dispose();
+        }
+    }
+
     public void Dispose()
     {
         // Dispose all watchdog timers
         foreach (var timer in _busyTimers.Values)
             timer.Dispose();
         _busyTimers.Clear();
+
+        foreach (var timer in _subagentTimers.Values)
+            timer.Dispose();
+        _subagentTimers.Clear();
 
         _sessions.Clear();
     }

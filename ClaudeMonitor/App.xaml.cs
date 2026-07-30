@@ -138,7 +138,8 @@ public partial class App : System.Windows.Application
             // or if StopFailure hook is missing (needed for API error detection)
             var needsMigration = File.Exists(SettingsPath) && HookConfigurator.AreHooksConfigured()
                 && (HookConfigurator.UsesLegacyFormat() || HookConfigurator.UsesPostToolUseIdle()
-                    || HookConfigurator.UsesMissingStopFailure());
+                    || HookConfigurator.UsesMissingStopFailure()
+                    || HookConfigurator.UsesMissingSubagentStop());
 
             if (needsMigration)
             {

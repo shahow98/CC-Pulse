@@ -43,6 +43,7 @@ internal static class Program
 
             var sessionId = "";
             var projectPath = "";
+            var toolName = "";
 
             if (!string.IsNullOrEmpty(input))
             {
@@ -53,6 +54,10 @@ internal static class Program
                         sessionId = sidProp.GetString() ?? "";
                     if (doc.RootElement.TryGetProperty("cwd", out var cwdProp))
                         projectPath = cwdProp.GetString() ?? "";
+                    // tool_name is present on PreToolUse/PostToolUse hooks.
+                    // When it is "Agent", the main agent is launching a subagent.
+                    if (doc.RootElement.TryGetProperty("tool_name", out var tnProp))
+                        toolName = tnProp.GetString() ?? "";
                 }
                 catch (JsonException)
                 {
@@ -79,6 +84,8 @@ internal static class Program
             };
             if (!string.IsNullOrEmpty(projectPath))
                 payload["projectPath"] = projectPath;
+            if (!string.IsNullOrEmpty(toolName))
+                payload["toolName"] = toolName;
 
             var json = JsonSerializer.Serialize(payload);
             var content = new StringContent(json, Encoding.UTF8, "application/json");

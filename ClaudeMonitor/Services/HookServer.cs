@@ -95,6 +95,7 @@ public class HookServer : IDisposable
             var payload = ParsePayload(body);
             var sessionId = payload.TryGetValue("sessionId", out var sid) ? sid : string.Empty;
             var projectPath = payload.TryGetValue("projectPath", out var pp) ? pp : string.Empty;
+            var toolName = payload.TryGetValue("toolName", out var tn) ? tn : string.Empty;
 
             if (string.IsNullOrEmpty(sessionId))
             {
@@ -103,7 +104,7 @@ public class HookServer : IDisposable
             }
 
             var route = request.Url?.AbsolutePath.Trim('/').ToLowerInvariant() ?? "";
-            HandleRoute(route, sessionId, projectPath);
+            HandleRoute(route, sessionId, projectPath, toolName);
 
             await SendResponseAsync(response, 200, "OK");
         }
@@ -115,7 +116,7 @@ public class HookServer : IDisposable
         }
     }
 
-    private void HandleRoute(string route, string sessionId, string projectPath)
+    private void HandleRoute(string route, string sessionId, string projectPath, string toolName = "")
     {
         switch (route)
         {
@@ -123,21 +124,47 @@ public class HookServer : IDisposable
                 _sessionManager.AddSession(sessionId, projectPath);
                 break;
             case "busy":
-                _sessionManager.UpdateStatus(sessionId, SessionStatus.Busy);
-                // Reset the watchdog timer on activity to keep the light red
-                // while Claude Code is actively working
-                _sessionManager.ResetBusyTimeout(sessionId);
+                // PreToolUse with tool_name "Agent" means the main agent is
+                // launching a subagent. The main agent then waits, so we mark
+                // a subagent as active (main → Idle, subagent row → Working)
+                // instead of marking the main session Busy.
+                if (string.Equals(toolName, "Agent", StringComparison.OrdinalIgnoreCase))
+                {
+                    _sessionManager.SetSubagentActive(sessionId, true);
+                }
+                else
+                {
+                    // Main agent tool activity. Do NOT clear the subagent flag
+                    // here: the main agent can fire PreToolUse while waiting for
+                    // a subagent (internal activity, completion notifications),
+                    // and treating that as "subagent finished" causes the
+                    // subagent row to vanish prematurely. Subagent clearing is
+                    // handled by SubagentStop, Stop/StopFailure, or the 120s
+                    // watchdog — never by main-agent activity.
+                    _sessionManager.UpdateStatus(sessionId, SessionStatus.Busy);
+                    // Reset the watchdog timer on activity to keep the light red
+                    // while Claude Code is actively working
+                    _sessionManager.ResetBusyTimeout(sessionId);
+                }
+                break;
+            case "subagent-stop":
+                // SubagentStop fires when a subagent finishes (when available).
+                _sessionManager.SetSubagentActive(sessionId, false);
                 break;
             case "idle":
+                // Stop / StopFailure: turn ended — clear any subagent flag too.
+                _sessionManager.SetSubagentActive(sessionId, false);
                 _sessionManager.UpdateStatus(sessionId, SessionStatus.Idle);
                 break;
             case "interactive":
                 // Notification (waiting for user input) → Idle (green)
+                _sessionManager.SetSubagentActive(sessionId, false);
                 _sessionManager.UpdateStatus(sessionId, SessionStatus.Idle);
                 break;
             case "stopfailure":
                 // StopFailure fires when a turn ends on API error (rate_limit, etc.)
                 // The turn has ended, so set to Idle
+                _sessionManager.SetSubagentActive(sessionId, false);
                 _sessionManager.UpdateStatus(sessionId, SessionStatus.Idle);
                 break;
             case "end":
