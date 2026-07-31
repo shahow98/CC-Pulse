@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 21
-- **Last Active**: 2026-07-31
+- **Total Sessions**: 22
+- **Last Active**: 2026-08-01
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~705 | Active |
+| `journal-1.md` | ~738 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 22 | 2026-08-01 | Verify subagent display end-to-end and clean up diagnostics | `7648fdb` | `feat/subagent-watcher` |
 | 21 | 2026-07-31 | Subagent filesystem watcher with per-subagent named rows | `7dc0e86` | `feat/subagent-watcher` |
 | 20 | 2026-07-30 | 信号灯布局重构 + subagent 检测 | `a13a147`, `399ea05` | `feat/traffic-light-layout` |
 | 19 | 2026-07-27 | Fix opacity check marks not updating in tray menu | `68a8b5b`, `64a04cc` | `main` |

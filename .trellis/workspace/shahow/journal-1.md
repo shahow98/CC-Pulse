@@ -703,3 +703,36 @@ Added SubagentWatcher, a polling service that scans each session's subagents/ di
 ### Next Steps
 
 - None - task complete
+
+
+## Session 22: Verify subagent display end-to-end and clean up diagnostics
+
+**Date**: 2026-08-01
+**Task**: Verify subagent display end-to-end and clean up diagnostics
+**Branch**: `feat/subagent-watcher`
+
+### Summary
+
+Diagnosed why subagents weren't showing: confirmed via diag log that SessionStart hook correctly passes projectPath and session registration succeeds. The registered sessions simply hadn't spawned subagents. Spawned a real Agent in the live session — UI showed the subagent row ('List project files slowly') and it cleared after completion, validating the full chain (hook -> register -> poll/scan -> last-activity timestamp -> 20s window -> UpdateSubagents -> UI). Removed all diagnostic scaffolding (DiagLog/DiagPath calls in SubagentWatcher, the DiagTest project, and the on-disk diag log). Committed the feature.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `7648fdb` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
