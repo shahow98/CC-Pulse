@@ -240,7 +240,11 @@ public class SessionManager : IDisposable
     /// Replace a session's active subagent list with the given set. Called
     /// authoritatively by <see cref="SubagentWatcher"/> after each poll.
     /// Reconciles the <see cref="SessionInfo.Subagents"/> collection in place
-    /// (add new, remove gone, update changed) so the UI rows stay stable.
+    /// by matching <see cref="SubagentInfo.AgentId"/> (NOT by position) so a
+    /// subagent's row is tied to its identity: when subagent A ends and
+    /// subagent B starts, B is not squeezed into A's old row slot (which left
+    /// A's display name visible until the next poll). Rows for ended subagents
+    /// are removed; new subagents are appended; surviving rows are updated.
     /// Also manages the subagent watchdog: active → start/reset, empty → stop.
     /// </summary>
     public void UpdateSubagents(string sessionId, IReadOnlyList<SubagentInfo> activeSubagents)
@@ -249,37 +253,51 @@ public class SessionManager : IDisposable
 
         var count = activeSubagents.Count;
 
-        // Reconcile the observable collection in place to preserve row order
-        // and avoid full-list flicker. Hold the session's subagents lock so
-        // WPF (which acquires the same lock via EnableCollectionSynchronization)
-        // sees a consistent view.
+        // Reconcile by AgentId so each row tracks its own subagent. Hold the
+        // session's subagents lock so WPF (which acquires the same lock via
+        // EnableCollectionSynchronization) sees a consistent view.
         var current = session.Subagents;
         lock (session.SubagentsLock)
         {
-            // Remove extras
-            while (current.Count > count)
-                current.RemoveAt(current.Count - 1);
-            // Add or update
+            // Map active ids → source info for quick lookup.
+            var activeById = new Dictionary<string, SubagentInfo>(count, StringComparer.Ordinal);
+            for (int i = 0; i < count; i++)
+                activeById[activeSubagents[i].AgentId] = activeSubagents[i];
+
+            // Remove rows whose subagent is no longer active (iterate backward).
+            for (int i = current.Count - 1; i >= 0; i--)
+            {
+                if (!activeById.ContainsKey(current[i].AgentId))
+                    current.RemoveAt(i);
+            }
+
+            // Update surviving rows and append new ones, preserving the active
+            // list's order. Reuse an existing row with the same AgentId if
+            // present; otherwise create one.
+            var existingById = new Dictionary<string, SubagentInfo>(current.Count, StringComparer.Ordinal);
+            foreach (var row in current)
+                existingById[row.AgentId] = row;
+
             for (int i = 0; i < count; i++)
             {
                 var src = activeSubagents[i];
-                if (i < current.Count)
+                if (existingById.TryGetValue(src.AgentId, out var dst))
                 {
-                    var dst = current[i];
-                    if (dst.AgentId != src.AgentId) dst.AgentId = src.AgentId;
                     if (dst.AgentType != src.AgentType) dst.AgentType = src.AgentType;
                     if (dst.Description != src.Description) dst.Description = src.Description;
                     if (dst.DisplayName != src.DisplayName) dst.DisplayName = src.DisplayName;
                 }
                 else
                 {
-                    current.Add(new SubagentInfo
+                    var info = new SubagentInfo
                     {
                         AgentId = src.AgentId,
                         AgentType = src.AgentType,
                         Description = src.Description,
                         DisplayName = src.DisplayName,
-                    });
+                    };
+                    current.Add(info);
+                    existingById[src.AgentId] = info;
                 }
             }
         }
@@ -295,6 +313,25 @@ public class SessionManager : IDisposable
         if (count > 0)
         {
             StartOrResetSubagentTimer(sessionId);
+
+            // Authoritative main-status correction: while a subagent is
+            // working, the main agent is waiting (Idle). Hooks can momentarily
+            // set main to Busy on internal activity while a subagent runs;
+            // the watcher overrides that here so the main indicator stays green.
+            if (session.Status == SessionStatus.Busy)
+            {
+                var oldStatus = session.Status;
+                session.Status = SessionStatus.Idle;
+                StopBusyTimer(sessionId);
+                StatusChanged?.Invoke(this, new SessionStatusChangedEventArgs
+                {
+                    SessionId = sessionId,
+                    OldStatus = oldStatus,
+                    NewStatus = SessionStatus.Idle,
+                    Session = session,
+                    SubagentChanged = true
+                });
+            }
         }
         else
         {
@@ -313,6 +350,83 @@ public class SessionManager : IDisposable
         });
 
         SessionsChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// Remove a single subagent's row from the session's <see cref="SessionInfo.Subagents"/>
+    /// collection, identified by <paramref name="agentId"/>. Called by the
+    /// SubagentStop hook (via HookServer) so a finished subagent disappears from
+    /// the UI immediately, instead of waiting for the SubagentWatcher's
+    /// stale-window to age it out. The watcher remains as a fallback for when
+    /// SubagentStop does not fire.
+    ///
+    /// If the removed row was the last one, the subagent-active flag and
+    /// watchdog are cleared. Raises SubagentChanged so the UI refreshes.
+    /// </summary>
+    public void RemoveSubagent(string sessionId, string agentId)
+    {
+        if (string.IsNullOrEmpty(agentId)) return;
+        if (!_sessions.TryGetValue(sessionId, out var session)) return;
+
+        var current = session.Subagents;
+        bool removed = false;
+        lock (session.SubagentsLock)
+        {
+            for (int i = current.Count - 1; i >= 0; i--)
+            {
+                if (string.Equals(current[i].AgentId, agentId, StringComparison.Ordinal))
+                {
+                    current.RemoveAt(i);
+                    removed = true;
+                    break;
+                }
+            }
+        }
+
+        if (!removed)
+        {
+            // The row wasn't present (watcher may have already aged it out, or
+            // the subagent started before the watcher added it). Still clear the
+            // scalar flag if no subagents remain, so SubagentActive reflects
+            // reality.
+            if (session.Subagents.Count == 0 && session.SubagentActive)
+                session.SubagentActive = false;
+            return;
+        }
+
+        // CollectionChanged (fired by RemoveAt) already re-notifies
+        // SubagentActive/SubagentWorking. Clear the scalar flag and stop the
+        // watchdog when no subagents remain.
+        if (session.Subagents.Count == 0)
+        {
+            if (session.SubagentActive)
+                session.SubagentActive = false;
+            StopSubagentTimer(sessionId);
+        }
+
+        session.LastUpdated = DateTime.Now;
+
+        StatusChanged?.Invoke(this, new SessionStatusChangedEventArgs
+        {
+            SessionId = sessionId,
+            OldStatus = session.Status,
+            NewStatus = session.Status,
+            Session = session,
+            SubagentChanged = true
+        });
+
+        SessionsChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// Whether a subagent is currently active for a session. Used by the hook
+    /// path to decide whether main-agent tool activity should mark the main
+    /// session Busy: while a subagent is running, the main agent is waiting, so
+    /// main stays Idle regardless of incidental tool hooks.
+    /// </summary>
+    public bool IsSubagentActive(string sessionId)
+    {
+        return _sessions.TryGetValue(sessionId, out var session) && session.SubagentActive;
     }
 
     /// <summary>Remove a session (session ended).</summary>

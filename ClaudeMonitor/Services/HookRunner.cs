@@ -36,6 +36,7 @@ public static class HookRunner
             var sessionId = "";
             var projectPath = "";
             var toolName = "";
+            var agentId = "";
 
             if (!string.IsNullOrEmpty(input))
             {
@@ -48,6 +49,11 @@ public static class HookRunner
                         projectPath = cwdProp.GetString() ?? "";
                     if (doc.RootElement.TryGetProperty("tool_name", out var tnProp))
                         toolName = tnProp.GetString() ?? "";
+                    // SubagentStop/SubagentStart payloads carry agent_id (the
+                    // subagent's identifier, matching its agent-<id>.jsonl
+                    // filename). Used to remove the exact subagent row on stop.
+                    if (doc.RootElement.TryGetProperty("agent_id", out var aidProp))
+                        agentId = aidProp.GetString() ?? "";
                 }
                 catch (JsonException)
                 {
@@ -76,6 +82,8 @@ public static class HookRunner
                 payload["projectPath"] = projectPath;
             if (!string.IsNullOrEmpty(toolName))
                 payload["toolName"] = toolName;
+            if (!string.IsNullOrEmpty(agentId))
+                payload["agentId"] = agentId;
 
             var json = JsonSerializer.Serialize(payload);
             var content = new StringContent(json, Encoding.UTF8, "application/json");

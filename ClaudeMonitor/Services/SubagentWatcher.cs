@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using ClaudeMonitor.Models;
@@ -24,14 +25,22 @@ namespace ClaudeMonitor.Services;
 public class SubagentWatcher : IDisposable
 {
     /// <summary>
-    /// A subagent jsonl whose last-write time falls within this window (relative
-    /// to now) is considered still active. Subagents append lines while working
-    /// and stop appending when done, so a stale mtime means the subagent ended.
+    /// A subagent whose last jsonl line timestamp falls within this window
+    /// (relative to now) is considered still active. Subagents append lines
+    /// while working and stop appending when done, so a stale last-timestamp
+    /// means the subagent ended.
+    ///
+    /// This is now a FALLBACK: the SubagentStop hook removes a finished
+    /// subagent's row immediately (via SessionManager.RemoveSubagent). This
+    /// window only governs the case where SubagentStop does not fire (some
+    /// modes don't emit it). 20s covers a subagent's think/long-tool gap
+    /// (30s+ with no new line is rare) while keeping the fallback residue
+    /// short. The watcher polls every 2s using the precise per-line timestamp.
     /// </summary>
-    private const int ActiveWindowSeconds = 15;
+    private const int ActiveWindowSeconds = 20;
 
     /// <summary>Poll interval for re-scanning each session's subagents directory.</summary>
-    private const int PollIntervalMs = 4000;
+    private const int PollIntervalMs = 2000;
 
     private const string SubagentsFolderName = "subagents";
 
@@ -64,7 +73,8 @@ public class SubagentWatcher : IDisposable
     /// </summary>
     public void RegisterSession(string sessionId, string projectPath)
     {
-        if (string.IsNullOrEmpty(sessionId) || string.IsNullOrEmpty(projectPath)) return;
+        if (string.IsNullOrEmpty(sessionId) || string.IsNullOrEmpty(projectPath))
+            return;
         lock (_lock)
         {
             _sessionProjects[sessionId] = projectPath;
@@ -120,14 +130,20 @@ public class SubagentWatcher : IDisposable
             return;
         }
 
-        var now = DateTime.Now;
+        var now = DateTime.UtcNow;
         var active = new List<SubagentInfo>();
 
         foreach (var jsonlPath in Directory.EnumerateFiles(subagentsDir, "agent-*.jsonl"))
         {
-            var lastWrite = File.GetLastWriteTime(jsonlPath);
-            if ((now - lastWrite).TotalSeconds > ActiveWindowSeconds)
-                continue; // stale — subagent already ended
+            // Judge activity by the timestamp on the LAST jsonl line (UTC,
+            // precise to the millisecond) rather than the file's last-write
+            // time. Windows NTFS mtime for append-heavy files is cached and
+            // can lag or stall, which caused subagents to vanish prematurely
+            // while still working. Each line carries a `timestamp` field, so
+            // the last line's timestamp is the authoritative "last activity".
+            var lastActivity = ReadLastActivityUtc(jsonlPath);
+            if (lastActivity is null || (now - lastActivity.Value).TotalSeconds > ActiveWindowSeconds)
+                continue; // stale — subagent already ended (or no parseable line)
 
             var agentId = ExtractAgentId(Path.GetFileName(jsonlPath));
             var meta = ReadMeta(subagentsDir, agentId);
@@ -183,6 +199,127 @@ public class SubagentWatcher : IDisposable
         if (fileName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
             fileName = fileName[..^suffix.Length];
         return fileName;
+    }
+
+    /// <summary>
+    /// Read the timestamp of the last complete line of an agent jsonl file,
+    /// returned as UTC. Each line is a JSON object with a top-level
+    /// <c>timestamp</c> field (ISO 8601, UTC, e.g. "2026-07-31T09:57:23.479Z").
+    /// This is far more reliable than <see cref="File.GetLastWriteTime"/>, whose
+    /// mtime on Windows is cached for append-heavy writes and can lag or stall.
+    ///
+    /// A single jsonl line can be tens of KB (assistant messages with large
+    /// attachments), so this scans backward from the end of the file in chunks
+    /// until it locates the last newline that terminates a complete line, then
+    /// parses that line. Returns null if no parseable timestamped line is found.
+    /// </summary>
+    private static DateTime? ReadLastActivityUtc(string jsonlPath)
+    {
+        try
+        {
+            using var fs = new FileStream(jsonlPath, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            var length = fs.Length;
+            if (length == 0) return null;
+
+            // Scan backward in chunks to find the start of the last complete
+            // line. The file ends with '\n' (after the last line), so the last
+            // complete line is the text between the second-to-last '\n' and the
+            // final '\n'. We collect bytes from the end until we have seen at
+            // least one '\n' that is not the very last byte.
+            const int chunkSize = 8192;
+            byte[] collected = Array.Empty<byte>();
+            var pos = length;
+            int newlineCount = 0;
+
+            while (pos > 0)
+            {
+                var readLen = (int)Math.Min(chunkSize, pos);
+                pos -= readLen;
+                fs.Seek(pos, SeekOrigin.Begin);
+                var chunk = new byte[readLen];
+                var read = fs.Read(chunk, 0, readLen);
+                if (read == 0) break;
+
+                // Prepend this chunk to what we've collected from the tail.
+                if (collected.Length > 0)
+                {
+                    var combined = new byte[read + collected.Length];
+                    Buffer.BlockCopy(chunk, 0, combined, 0, read);
+                    Buffer.BlockCopy(collected, 0, combined, read, collected.Length);
+                    collected = combined;
+                }
+                else
+                {
+                    collected = chunk;
+                }
+
+                // Count newlines in the freshly read region (the first `read`
+                // bytes of `collected`). Stop once we have a complete line.
+                for (int i = read - 1; i >= 0; i--)
+                {
+                    if (chunk[i] == '\n')
+                    {
+                        newlineCount++;
+                        if (newlineCount >= 2)
+                        {
+                            // The byte after this '\n' begins the last complete line.
+                            return ParseTimestampFromTail(collected, i + 1);
+                        }
+                    }
+                }
+
+                // Safety cap: never read more than ~256 KB looking for a line.
+                if (collected.Length > 256 * 1024) break;
+            }
+
+            // Reached the start of file with fewer than 2 newlines: the whole
+            // file is one line (or the first line is the last complete line).
+            return ParseTimestampFromTail(collected, 0);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Given a byte buffer and a start offset, extract the line beginning at
+    /// <paramref name="start"/> (up to the next '\n' or end of buffer), parse
+    /// it as JSON, and return its <c>timestamp</c> as UTC. Returns null if the
+    /// line is empty, not JSON, or has no parseable timestamp.
+    /// </summary>
+    private static DateTime? ParseTimestampFromTail(byte[] buffer, int start)
+    {
+        // Find the end of the line starting at `start`.
+        int end = start;
+        while (end < buffer.Length && buffer[end] != '\n')
+            end++;
+
+        if (end <= start) return null;
+
+        var line = Encoding.UTF8.GetString(buffer, start, end - start).Trim();
+        if (line.Length == 0 || line[0] != '{') return null;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(line);
+            if (doc.RootElement.TryGetProperty("timestamp", out var tsProp)
+                && tsProp.ValueKind == JsonValueKind.String
+                && DateTime.TryParse(tsProp.GetString(),
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AssumeUniversal
+                    | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                    out var dt))
+            {
+                return dt.ToUniversalTime();
+            }
+        }
+        catch
+        {
+            // Malformed line — no timestamp available.
+        }
+        return null;
     }
 
     /// <summary>Read the matching agent-&lt;id&gt;.meta.json, if present.</summary>

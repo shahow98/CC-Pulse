@@ -96,6 +96,7 @@ public class HookServer : IDisposable
             var sessionId = payload.TryGetValue("sessionId", out var sid) ? sid : string.Empty;
             var projectPath = payload.TryGetValue("projectPath", out var pp) ? pp : string.Empty;
             var toolName = payload.TryGetValue("toolName", out var tn) ? tn : string.Empty;
+            var agentId = payload.TryGetValue("agentId", out var aid) ? aid : string.Empty;
 
             if (string.IsNullOrEmpty(sessionId))
             {
@@ -104,7 +105,7 @@ public class HookServer : IDisposable
             }
 
             var route = request.Url?.AbsolutePath.Trim('/').ToLowerInvariant() ?? "";
-            HandleRoute(route, sessionId, projectPath, toolName);
+            HandleRoute(route, sessionId, projectPath, toolName, agentId);
 
             await SendResponseAsync(response, 200, "OK");
         }
@@ -116,7 +117,7 @@ public class HookServer : IDisposable
         }
     }
 
-    private void HandleRoute(string route, string sessionId, string projectPath, string toolName = "")
+    private void HandleRoute(string route, string sessionId, string projectPath, string toolName = "", string agentId = "")
     {
         switch (route)
         {
@@ -132,15 +133,24 @@ public class HookServer : IDisposable
                 {
                     _sessionManager.SetSubagentActive(sessionId, true);
                 }
+                else if (_sessionManager.IsSubagentActive(sessionId))
+                {
+                    // A subagent is running, so the main agent is waiting —
+                    // main stays Idle. The main agent can fire PreToolUse /
+                    // PostToolUse while a subagent runs (internal activity,
+                    // completion notifications, subagent-result handling).
+                    // Treating that as main Busy would briefly turn the main
+                    // indicator red even though the main agent is idle. The
+                    // SubagentWatcher also enforces this every poll, but
+                    // suppressing it here avoids the flicker between polls.
+                    // Do NOT clear the subagent flag here — subagent clearing
+                    // is handled by SubagentStop, Stop/StopFailure, the 120s
+                    // watchdog, or the watcher seeing no active subagents.
+                    _sessionManager.ResetBusyTimeout(sessionId);
+                }
                 else
                 {
-                    // Main agent tool activity. Do NOT clear the subagent flag
-                    // here: the main agent can fire PreToolUse while waiting for
-                    // a subagent (internal activity, completion notifications),
-                    // and treating that as "subagent finished" causes the
-                    // subagent row to vanish prematurely. Subagent clearing is
-                    // handled by SubagentStop, Stop/StopFailure, or the 120s
-                    // watchdog — never by main-agent activity.
+                    // Main agent tool activity with no subagent running → Busy.
                     _sessionManager.UpdateStatus(sessionId, SessionStatus.Busy);
                     // Reset the watchdog timer on activity to keep the light red
                     // while Claude Code is actively working
@@ -148,8 +158,16 @@ public class HookServer : IDisposable
                 }
                 break;
             case "subagent-stop":
-                // SubagentStop fires when a subagent finishes (when available).
-                _sessionManager.SetSubagentActive(sessionId, false);
+                // SubagentStop fires when a subagent finishes. If the payload
+                // carries the subagent's agent_id, remove that exact row from
+                // the Subagents collection so it disappears immediately (rather
+                // than waiting for the watcher's stale-window to age it out).
+                // Without agent_id, fall back to clearing the scalar flag and
+                // let the watcher reconcile.
+                if (!string.IsNullOrEmpty(agentId))
+                    _sessionManager.RemoveSubagent(sessionId, agentId);
+                else
+                    _sessionManager.SetSubagentActive(sessionId, false);
                 break;
             case "idle":
                 // Stop / StopFailure: turn ended — clear any subagent flag too.

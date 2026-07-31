@@ -67,7 +67,12 @@
                                VerticalAlignment="Center" />
                 </Grid>
 
-                <!-- Subagent rows (one per active subagent; hidden when none active) -->
+                <!-- Subagent rows (one per active subagent; hidden when none active).
+                     SubagentActive's getter ORs the hook flag with Subagents.Count,
+                     and CollectionChanged re-notifies it, so the list stays visible
+                     as long as the watcher sees any active subagent — even if a
+                     transient SubagentStop hook sets the flag false between two
+                     serial subagents. -->
                 <ItemsControl ItemsSource="{Binding Subagents}"
                               Visibility="{Binding SubagentActive, Converter={StaticResource BooleanToVisibilityConverter}}">
                     <ItemsControl.ItemTemplate>
