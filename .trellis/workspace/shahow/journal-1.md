@@ -736,3 +736,36 @@ Diagnosed why subagents weren't showing: confirmed via diag log that SessionStar
 ### Next Steps
 
 - None - task complete
+
+
+## Session 23: Subagent 显示优化：单行两态 working/idle
+
+**Date**: 2026-08-01
+**Task**: Subagent 显示优化：单行两态 working/idle
+**Branch**: `feat/subagent-watcher`
+
+### Summary
+
+将 subagent 显示从「按名字每个一行」改为单行两态：有 subagent 工作显示 subagent Working…(红)，全部结束显示 subagent Idle(绿)。新增 HasSubagentActivity 锁存字段，仅在有 subagent 活动后显示该行；更新 XAML 单行布局、SubagentStatusToTextConverter 与 Lang 文案，移除 SubagentColorConverter 和 StatusSubagentBusyNamed。检测机制（SubagentWatcher）保持不变。构建通过 0 警告 0 错误。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `2d92c31` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

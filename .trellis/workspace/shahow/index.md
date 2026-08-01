@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 22
+- **Total Sessions**: 23
 - **Last Active**: 2026-08-01
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~738 | Active |
+| `journal-1.md` | ~771 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 23 | 2026-08-01 | Subagent 显示优化：单行两态 working/idle | `2d92c31` | `feat/subagent-watcher` |
 | 22 | 2026-08-01 | Verify subagent display end-to-end and clean up diagnostics | `7648fdb` | `feat/subagent-watcher` |
 | 21 | 2026-07-31 | Subagent filesystem watcher with per-subagent named rows | `7dc0e86` | `feat/subagent-watcher` |
 | 20 | 2026-07-30 | 信号灯布局重构 + subagent 检测 | `a13a147`, `399ea05` | `feat/traffic-light-layout` |
