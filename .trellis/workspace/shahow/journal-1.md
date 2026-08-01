@@ -769,3 +769,36 @@ Diagnosed why subagents weren't showing: confirmed via diag log that SessionStar
 ### Next Steps
 
 - None - task complete
+
+
+## Session 24: Hook lifecycle: insert on launch, remove on exit
+
+**Date**: 2026-08-01
+**Task**: Hook lifecycle: insert on launch, remove on exit
+**Branch**: `feat/subagent-watcher`
+
+### Summary
+
+Changed CC-Pulse hook lifecycle so hooks are inserted into ~/.claude/settings.json on app startup (EnsureHooksConfigured, with legacy-format migration preserved) and removed on exit via HookConfigurator.Remove() in OnExit. Previously hooks lingered permanently and fired against a dead HookServer while CC-Pulse was closed. Also gitignored the .codegraph/ index artifact.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `d840a5d` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
