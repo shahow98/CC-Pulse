@@ -11,6 +11,10 @@ namespace ClaudeMonitor;
 /// Main application class. Manages the lifecycle of all components:
 /// SessionManager, HookServer, TrayManager, and StatusWindow.
 ///
+/// Hook lifecycle: CC-Pulse hooks are inserted into ~/.claude/settings.json
+/// on startup (EnsureHooksConfigured) and removed on exit (OnExit), so they
+/// only fire while CC-Pulse is actually running.
+///
 /// Also supports CLI sub-commands for hook operations (replaces .cmd scripts):
 ///   ClaudeMonitor.exe hook &lt;endpoint&gt;        — send status update to HookServer
 ///   ClaudeMonitor.exe configure-hooks            — add CC-Pulse hooks to settings.json
@@ -61,7 +65,9 @@ public partial class App : System.Windows.Application
             }
         }
 
-        // Auto-configure hooks on first launch (or if not yet configured)
+        // Insert CC-Pulse hooks into Claude Code settings on launch.
+        // They are removed again on exit (see OnExit) so they don't fire
+        // against a dead HookServer while CC-Pulse is closed.
         EnsureHooksConfigured();
 
         // Initialize core services
@@ -277,6 +283,18 @@ public partial class App : System.Windows.Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        // Remove CC-Pulse hooks from Claude Code settings so they don't linger
+        // (and fire against a dead HookServer) while CC-Pulse is closed.
+        // They are re-inserted on the next launch by EnsureHooksConfigured.
+        try
+        {
+            HookConfigurator.Remove();
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Failed to remove CC-Pulse hooks on exit: {ex.Message}");
+        }
+
         // Clean up resources in reverse order
         _hookServer?.Dispose();
         _subagentWatcher?.Dispose();

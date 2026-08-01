@@ -18,6 +18,9 @@ publish/
 .vscode/
 .idea/
 
+## CodeGraph index (tooling artifact)
+.codegraph/
+
 ## OS
 Thumbs.db
 Desktop.ini
