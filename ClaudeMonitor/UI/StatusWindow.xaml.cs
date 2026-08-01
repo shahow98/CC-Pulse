@@ -288,40 +288,17 @@ public class MainStatusToTextConverter : IValueConverter
 }
 
 /// <summary>
-/// Converts a subagent's display name (from SubagentInfo.DisplayName) to a
-/// labeled text string: "subagent · {name} · Working…". Falls back to the
-/// plain subagent working text when no name is available.
+/// Converts the SubagentWorking flag (bool) to a labeled text string for the
+/// single subagent status row: "subagent  Working…" while any subagent is
+/// running, "subagent  Idle" once all subagents have finished.
 /// </summary>
 public class SubagentStatusToTextConverter : IValueConverter
 {
     public object Convert(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
     {
-        // value is the SubagentInfo.DisplayName string (bound via {Binding DisplayName}).
-        if (value is string name && !string.IsNullOrWhiteSpace(name))
-        {
-            return Lang.Get("StatusSubagentBusyNamed", name);
-        }
-        return Lang.Get("StatusSubagentBusy");
-    }
-
-    public object ConvertBack(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
-    {
-        throw new NotImplementedException();
-    }
-}
-
-/// <summary>
-/// Returns the brush for a subagent row. Subagent rows are only visible while
-/// the subagent is working, so this always returns the red (working) brush.
-/// Bound to the SubagentInfo object itself (no path).
-/// </summary>
-public class SubagentColorConverter : IValueConverter
-{
-    private static readonly SolidColorBrush RedBrush = new(System.Windows.Media.Color.FromRgb(231, 76, 60));
-
-    public object Convert(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
-    {
-        return RedBrush;
+        if (value is bool working && working)
+            return Lang.Get("StatusSubagentBusy");
+        return Lang.Get("StatusSubagentIdle");
     }
 
     public object ConvertBack(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)

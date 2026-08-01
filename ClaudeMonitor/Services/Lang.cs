@@ -23,7 +23,7 @@ public static class Lang
         ["StatusMainIdle"] = "main  Idle",
         ["StatusMainBusy"] = "main  Working…",
         ["StatusSubagentBusy"] = "subagent  Working…",
-        ["StatusSubagentBusyNamed"] = "subagent · {0} · Working…",
+        ["StatusSubagentIdle"] = "subagent  Idle",
 
         // Status window
         ["NoActiveSessions"] = "No active sessions",
@@ -72,7 +72,7 @@ public static class Lang
         ["StatusMainIdle"] = "main  空闲",
         ["StatusMainBusy"] = "main  工作中…",
         ["StatusSubagentBusy"] = "subagent  工作中…",
-        ["StatusSubagentBusyNamed"] = "subagent · {0} · 工作中…",
+        ["StatusSubagentIdle"] = "subagent  空闲",
 
         // Status window
         ["NoActiveSessions"] = "无活动会话",

@@ -5,7 +5,9 @@ namespace ClaudeMonitor.Models;
 
 /// <summary>
 /// Holds state for a single active subagent (spawned via the Agent/Task tool).
-/// Each active subagent is shown as its own row in the status window.
+/// The subagent watcher maintains one instance per detected subagent; the UI
+/// aggregates them into a single working/idle indicator rather than showing
+/// each individually.
 /// </summary>
 public class SubagentInfo : INotifyPropertyChanged
 {

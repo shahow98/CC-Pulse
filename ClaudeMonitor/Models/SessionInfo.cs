@@ -30,15 +30,17 @@ public class SessionInfo : INotifyPropertyChanged
     private string _projectPath = string.Empty;
     private string _displayName = string.Empty;
     private bool _subagentActive;
+    private bool _hasSubagentActivity;
     private string _subagentDescription = string.Empty;
     private bool _isWorking;
 
     /// <summary>
-    /// The list of currently active subagents for this session, each shown as
-    /// its own row in the status window. Populated authoritatively by
-    /// <see cref="Services.SubagentWatcher"/>; the hook path may also set
-    /// <see cref="SubagentActive"/> for instant feedback before the watcher
-    /// reconciles.
+    /// The set of currently active subagents for this session. Populated
+    /// authoritatively by <see cref="Services.SubagentWatcher"/>; the hook path
+    /// may also set <see cref="SubagentActive"/> for instant feedback before the
+    /// watcher reconciles. The UI shows a single aggregate subagent row derived
+    /// from this collection (<see cref="SubagentWorking"/>), not one row per
+    /// subagent.
     /// </summary>
     public ObservableCollection<SubagentInfo> Subagents { get; } = new();
 
@@ -63,9 +65,12 @@ public class SessionInfo : INotifyPropertyChanged
 
         // When the watcher adds/removes subagents, re-notify the derived
         // SubagentActive/SubagentWorking bindings so the row visibility and
-        // indicator color update.
+        // indicator color update. The first observed subagent latches
+        // HasSubagentActivity so the single subagent status row appears.
         Subagents.CollectionChanged += (_, _) =>
         {
+            if (Subagents.Count > 0)
+                HasSubagentActivity = true;
             OnPropertyChanged(nameof(SubagentActive));
             OnPropertyChanged(nameof(SubagentWorking));
             RefreshIsWorking();
@@ -125,11 +130,27 @@ public class SessionInfo : INotifyPropertyChanged
         {
             if (SetField(ref _subagentActive, value))
             {
+                if (value)
+                    HasSubagentActivity = true;
                 // SubagentWorking derives from SubagentActive, notify its binding
                 OnPropertyChanged(nameof(SubagentWorking));
                 RefreshIsWorking();
             }
         }
+    }
+
+    /// <summary>
+    /// Latch: true once a subagent has been detected in this session (via the
+    /// Agent/Task hook or the filesystem watcher). The single subagent status
+    /// row is only visible after this becomes true, so sessions that never
+    /// spawn a subagent show no subagent row at all. Once set it stays true
+    /// for the session's lifetime — the row persists after the last subagent
+    /// finishes and flips to the idle state.
+    /// </summary>
+    public bool HasSubagentActivity
+    {
+        get => _hasSubagentActivity;
+        private set => SetField(ref _hasSubagentActivity, value);
     }
 
     /// <summary>
