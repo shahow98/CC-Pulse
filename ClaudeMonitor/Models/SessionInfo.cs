@@ -54,6 +54,61 @@ public class SessionInfo : INotifyPropertyChanged
     /// <summary>Lock for thread-safe mutation of <see cref="Subagents"/>.</summary>
     internal object SubagentsLock => _subagentsLock;
 
+    /// <summary>
+    /// The set of currently in-flight main-agent tool_use_ids (PreToolUse fired
+    /// but PostToolUse not yet). Used by the watchdog to apply a longer timeout
+    /// while a tool is executing (TASKS.md §3.2): a long-running Bash compile
+    /// should not be killed by the 60s busy timer. Tracked by tool_use_id so
+    /// duplicate PreToolUse events are idempotent. Guarded by
+    /// <see cref="_activeToolsLock"/>.
+    /// </summary>
+    private readonly HashSet<string> _activeTools = new();
+    private readonly object _activeToolsLock = new();
+
+    /// <summary>
+    /// True when there are in-flight main-agent tool calls (PreToolUse without
+    /// a matching PostToolUse). Drives the watchdog's long-timeout branch.
+    /// </summary>
+    public bool HasActiveOperations
+    {
+        get
+        {
+            lock (_activeToolsLock)
+            {
+                return _activeTools.Count > 0;
+            }
+        }
+    }
+
+    /// <summary>Track an in-flight tool_use_id (PreToolUse). Idempotent.</summary>
+    public void TrackTool(string toolUseId)
+    {
+        if (string.IsNullOrEmpty(toolUseId)) return;
+        lock (_activeToolsLock)
+        {
+            _activeTools.Add(toolUseId);
+        }
+    }
+
+    /// <summary>Untrack a tool_use_id (PostToolUse). Idempotent; ignores unknown ids.</summary>
+    public void UntrackTool(string toolUseId)
+    {
+        if (string.IsNullOrEmpty(toolUseId)) return;
+        lock (_activeToolsLock)
+        {
+            _activeTools.Remove(toolUseId);
+        }
+    }
+
+    /// <summary>Clear all in-flight tool ids (on Stop/StopFailure).</summary>
+    public void ClearActiveTools()
+    {
+        lock (_activeToolsLock)
+        {
+            _activeTools.Clear();
+        }
+    }
+
     public SessionInfo()
     {
         // Allow cross-thread mutation of Subagents: WPF will acquire this lock

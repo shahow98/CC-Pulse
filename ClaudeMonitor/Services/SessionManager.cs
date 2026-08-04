@@ -26,6 +26,17 @@ public class SessionManager : IDisposable
     private const int BusyTimeoutSeconds = 60;
 
     /// <summary>
+    /// Extended timeout applied while the session has in-flight tool calls
+    /// (ActiveTools non-empty). A long-running tool (Bash compile, large file
+    /// processing) emits no hooks between PreToolUse and PostToolUse, so the
+    /// short 60s timer would prematurely reset the session to Idle. Per
+    /// TASKS.md §3.2, tool execution should not be interrupted by the
+    /// watchdog. 30 minutes covers virtually all real tool runs; if it still
+    /// expires, the anomaly is logged before resetting.
+    /// </summary>
+    private const int LongBusyTimeoutSeconds = 1800;
+
+    /// <summary>
     /// Timeout after which a subagent-active flag is automatically cleared.
     /// SubagentStop is not reliably fired by Claude Code, so this watchdog
     /// ensures the subagent row eventually disappears. The timer is reset on
@@ -429,6 +440,77 @@ public class SessionManager : IDisposable
         return _sessions.TryGetValue(sessionId, out var session) && session.SubagentActive;
     }
 
+    /// <summary>
+    /// Track an in-flight main-agent tool call by its tool_use_id (PreToolUse).
+    /// Idempotent. The presence of active tools switches the watchdog to its
+    /// long-timeout tier so a long tool run is not interrupted (§3.2).
+    /// </summary>
+    public void TrackTool(string sessionId, string toolUseId)
+    {
+        if (!_sessions.TryGetValue(sessionId, out var session)) return;
+        session.TrackTool(toolUseId);
+    }
+
+    /// <summary>
+    /// Untrack a tool call by tool_use_id (PostToolUse). Idempotent; ignores
+    /// unknown ids. After untracking, the caller should refresh the busy timer
+    /// so the short timeout tier reapplies if no tools remain in flight.
+    /// </summary>
+    public void UntrackTool(string sessionId, string toolUseId)
+    {
+        if (!_sessions.TryGetValue(sessionId, out var session)) return;
+        session.UntrackTool(toolUseId);
+    }
+
+    /// <summary>
+    /// Whether the session has in-flight main-agent tool calls. Used by the
+    /// Stop/StopFailure path to detect event-chain breakage (§3.6).
+    /// </summary>
+    public bool HasActiveOperations(string sessionId)
+    {
+        return _sessions.TryGetValue(sessionId, out var session) && session.HasActiveOperations;
+    }
+
+    /// <summary>Clear all in-flight tool ids for a session (on Stop/StopFailure).</summary>
+    public void ClearActiveTools(string sessionId)
+    {
+        if (!_sessions.TryGetValue(sessionId, out var session)) return;
+        session.ClearActiveTools();
+    }
+
+    /// <summary>
+    /// Record a compaction event for a session WITHOUT resetting its state
+    /// (TASKS.md §3.5). Compaction is a continuation of the current session,
+    /// not a new one: ActiveTools, Subagents, and the Busy/Idle status must be
+    /// preserved. If the session is unknown (compact arrived before
+    /// SessionStart, an unusual ordering), fall back to AddSession so it is at
+    /// least tracked.
+    /// </summary>
+    public void MarkCompacting(string sessionId, string projectPath = "")
+    {
+        if (!_sessions.TryGetValue(sessionId, out var session))
+        {
+            AddSession(sessionId, projectPath);
+            return;
+        }
+        session.LastUpdated = DateTime.Now;
+        System.Diagnostics.Debug.WriteLine(
+            $"[CC-Pulse] compact: session {sessionId} state preserved ({session.Status})");
+    }
+
+    /// <summary>
+    /// Log a state-machine anomaly for later analysis (TASKS.md §3.6). Examples:
+    /// a Stop received while tools are still in flight (event-chain breakage),
+    /// or a watchdog timeout while tools are in flight. Writes to Debug output.
+    /// </summary>
+    public void LogAnomaly(string sessionId, string type)
+    {
+        if (!_sessions.TryGetValue(sessionId, out var session)) return;
+        var activeOps = session.HasActiveOperations;
+        System.Diagnostics.Debug.WriteLine(
+            $"[CC-Pulse] anomaly: {type} session={sessionId} status={session.Status} activeOps={activeOps}");
+    }
+
     /// <summary>Remove a session (session ended).</summary>
     public void RemoveSession(string sessionId)
     {
@@ -451,16 +533,40 @@ public class SessionManager : IDisposable
     }
 
     /// <summary>
-    /// Start or reset the watchdog timer for a Busy session.
-    /// If the timer expires, the session is automatically set to Idle.
+    /// Start or reset the watchdog timer for a Busy session. The timeout is
+    /// tiered (TASKS.md §3.2): the short 60s timeout guards against a lost
+    /// Stop hook during thinking/streaming, while the 30min long timeout
+    /// applies when a tool is in flight (ActiveTools non-empty) so a long
+    /// tool run is not interrupted. If the long timeout still expires, an
+    /// anomaly is logged before the reset (§3.6).
     /// </summary>
     private void StartOrResetBusyTimer(string sessionId)
     {
+        if (!_sessions.TryGetValue(sessionId, out var session))
+        {
+            StartOrResetBusyTimer(sessionId, BusyTimeoutSeconds, hasActiveOps: false);
+            return;
+        }
+        var hasActiveOps = session.HasActiveOperations;
+        var timeout = hasActiveOps ? LongBusyTimeoutSeconds : BusyTimeoutSeconds;
+        StartOrResetBusyTimer(sessionId, timeout, hasActiveOps);
+    }
+
+    /// <summary>Timer factory with a chosen timeout and anomaly context.</summary>
+    private void StartOrResetBusyTimer(string sessionId, int timeoutSeconds, bool hasActiveOps)
+    {
         var timer = new System.Threading.Timer(_ =>
         {
-            // Timer expired — no activity detected, reset to Idle
+            // Timer expired — no activity detected within the window.
+            if (hasActiveOps)
+            {
+                // A tool was in flight but never completed (PostToolUse lost,
+                // or a genuinely stuck tool). Log the anomaly before resetting
+                // so the event-chain breakage is visible for analysis (§3.6).
+                LogAnomaly(sessionId, "watchdog_timeout_with_active_ops");
+            }
             UpdateStatus(sessionId, SessionStatus.Idle);
-        }, null, TimeSpan.FromSeconds(BusyTimeoutSeconds), Timeout.InfiniteTimeSpan);
+        }, null, TimeSpan.FromSeconds(timeoutSeconds), Timeout.InfiniteTimeSpan);
 
         var oldTimer = _busyTimers.GetValueOrDefault(sessionId);
         _busyTimers[sessionId] = timer;

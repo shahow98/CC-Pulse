@@ -91,6 +91,13 @@ public partial class App : System.Windows.Application
         // Start the HTTP hook server
         _hookServer.Start();
 
+        // Replay any hook events queued while CC-Pulse was not running
+        // (TASKS.md §5): the hook proxy writes to ~/.claude/cc-pulse-queue.ndjson
+        // when the HookServer is unreachable. Re-deliver them now that the
+        // server is up, so state converges to what Claude Code actually did.
+        try { QueueManager.Replay(); }
+        catch (Exception ex) { Debug.WriteLine($"Queue replay failed: {ex.Message}"); }
+
         // Show the status window
         _statusWindow.Show();
     }

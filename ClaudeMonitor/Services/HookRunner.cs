@@ -14,9 +14,11 @@ namespace ClaudeMonitor.Services;
 public static class HookRunner
 {
     private const string HookServerUrl = "http://localhost:8765";
+    // 1s timeout per TASKS.md §5 (≤1s). Synchronous POST is required so the
+    // event is actually sent before the process exits.
     private static readonly HttpClient _httpClient = new()
     {
-        Timeout = TimeSpan.FromSeconds(2),
+        Timeout = TimeSpan.FromSeconds(1),
     };
 
     /// <summary>
@@ -37,6 +39,13 @@ public static class HookRunner
             var projectPath = "";
             var toolName = "";
             var agentId = "";
+            // Standardized metadata per TASKS.md §3.4 (mirrors HookProxy).
+            var hookEvent = "";
+            var toolUseId = "";
+            var source = "";
+            var message = "";
+            var title = "";
+            var notifType = "";
 
             if (!string.IsNullOrEmpty(input))
             {
@@ -54,6 +63,18 @@ public static class HookRunner
                     // filename). Used to remove the exact subagent row on stop.
                     if (doc.RootElement.TryGetProperty("agent_id", out var aidProp))
                         agentId = aidProp.GetString() ?? "";
+                    if (doc.RootElement.TryGetProperty("hook_event_name", out var heProp))
+                        hookEvent = heProp.GetString() ?? "";
+                    if (doc.RootElement.TryGetProperty("tool_use_id", out var tuiProp))
+                        toolUseId = tuiProp.GetString() ?? "";
+                    if (doc.RootElement.TryGetProperty("source", out var srcProp))
+                        source = srcProp.GetString() ?? "";
+                    if (doc.RootElement.TryGetProperty("message", out var msgProp))
+                        message = msgProp.GetString() ?? "";
+                    if (doc.RootElement.TryGetProperty("title", out var titleProp))
+                        title = titleProp.GetString() ?? "";
+                    if (doc.RootElement.TryGetProperty("type", out var typeProp))
+                        notifType = typeProp.GetString() ?? "";
                 }
                 catch (JsonException)
                 {
@@ -77,6 +98,7 @@ public static class HookRunner
             var payload = new Dictionary<string, string>
             {
                 ["sessionId"] = sessionId,
+                ["endpoint"] = endpoint,
             };
             if (!string.IsNullOrEmpty(projectPath))
                 payload["projectPath"] = projectPath;
@@ -84,6 +106,18 @@ public static class HookRunner
                 payload["toolName"] = toolName;
             if (!string.IsNullOrEmpty(agentId))
                 payload["agentId"] = agentId;
+            if (!string.IsNullOrEmpty(hookEvent))
+                payload["hookEvent"] = hookEvent;
+            if (!string.IsNullOrEmpty(toolUseId))
+                payload["toolUseId"] = toolUseId;
+            if (!string.IsNullOrEmpty(source))
+                payload["source"] = source;
+            if (!string.IsNullOrEmpty(message))
+                payload["message"] = message;
+            if (!string.IsNullOrEmpty(title))
+                payload["title"] = title;
+            if (!string.IsNullOrEmpty(notifType))
+                payload["type"] = notifType;
 
             var json = JsonSerializer.Serialize(payload);
             var content = new StringContent(json, Encoding.UTF8, "application/json");
@@ -92,9 +126,18 @@ public static class HookRunner
             // Fire-and-forget (_ = PostAsync) causes the process to exit before
             // the HTTP request is sent, since the runtime doesn't wait for
             // orphaned Tasks when the process terminates.
-            _ = _httpClient.PostAsync($"{HookServerUrl}/{endpoint}", content).Result;
-
-            return 0;
+            try
+            {
+                _ = _httpClient.PostAsync($"{HookServerUrl}/{endpoint}", content).Result;
+                return 0;
+            }
+            catch (Exception)
+            {
+                // HookServer unreachable — enqueue to local NDJSON queue so the
+                // event is replayed on next CC-Pulse launch (TASKS.md §5).
+                try { QueueManager.Enqueue(json); } catch { /* ignore */ }
+                return 1;
+            }
         }
         catch (Exception)
         {

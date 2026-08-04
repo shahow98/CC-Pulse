@@ -97,6 +97,14 @@ public class HookServer : IDisposable
             var projectPath = payload.TryGetValue("projectPath", out var pp) ? pp : string.Empty;
             var toolName = payload.TryGetValue("toolName", out var tn) ? tn : string.Empty;
             var agentId = payload.TryGetValue("agentId", out var aid) ? aid : string.Empty;
+            // Standardized metadata (TASKS.md §3.4): the originating hook event
+            // name, tool_use_id, SessionStart source, and Notification fields.
+            var hookEvent = payload.TryGetValue("hookEvent", out var he) ? he : string.Empty;
+            var toolUseId = payload.TryGetValue("toolUseId", out var tui) ? tui : string.Empty;
+            var source = payload.TryGetValue("source", out var src) ? src : string.Empty;
+            var message = payload.TryGetValue("message", out var msg) ? msg : string.Empty;
+            var title = payload.TryGetValue("title", out var ttl) ? ttl : string.Empty;
+            var notifType = payload.TryGetValue("type", out var nty) ? nty : string.Empty;
 
             if (string.IsNullOrEmpty(sessionId))
             {
@@ -105,7 +113,8 @@ public class HookServer : IDisposable
             }
 
             var route = request.Url?.AbsolutePath.Trim('/').ToLowerInvariant() ?? "";
-            HandleRoute(route, sessionId, projectPath, toolName, agentId);
+            HandleRoute(route, sessionId, projectPath, toolName, agentId,
+                hookEvent, toolUseId, source, message, title, notifType);
 
             await SendResponseAsync(response, 200, "OK");
         }
@@ -117,45 +126,28 @@ public class HookServer : IDisposable
         }
     }
 
-    private void HandleRoute(string route, string sessionId, string projectPath, string toolName = "", string agentId = "")
+    private void HandleRoute(string route, string sessionId, string projectPath,
+        string toolName = "", string agentId = "",
+        string hookEvent = "", string toolUseId = "", string source = "",
+        string message = "", string title = "", string notifType = "")
     {
         switch (route)
         {
             case "start":
-                _sessionManager.AddSession(sessionId, projectPath);
-                break;
-            case "busy":
-                // PreToolUse with tool_name "Agent" means the main agent is
-                // launching a subagent. The main agent then waits, so we mark
-                // a subagent as active (main → Idle, subagent row → Working)
-                // instead of marking the main session Busy.
-                if (string.Equals(toolName, "Agent", StringComparison.OrdinalIgnoreCase))
+                // SessionStart: differentiate by source (TASKS.md §3.5).
+                // compact is a continuation of the current session — preserve
+                // state instead of resetting. startup/clear/resume start fresh.
+                if (string.Equals(source, "compact", StringComparison.OrdinalIgnoreCase))
                 {
-                    _sessionManager.SetSubagentActive(sessionId, true);
-                }
-                else if (_sessionManager.IsSubagentActive(sessionId))
-                {
-                    // A subagent is running, so the main agent is waiting —
-                    // main stays Idle. The main agent can fire PreToolUse /
-                    // PostToolUse while a subagent runs (internal activity,
-                    // completion notifications, subagent-result handling).
-                    // Treating that as main Busy would briefly turn the main
-                    // indicator red even though the main agent is idle. The
-                    // SubagentWatcher also enforces this every poll, but
-                    // suppressing it here avoids the flicker between polls.
-                    // Do NOT clear the subagent flag here — subagent clearing
-                    // is handled by SubagentStop, Stop/StopFailure, the 120s
-                    // watchdog, or the watcher seeing no active subagents.
-                    _sessionManager.ResetBusyTimeout(sessionId);
+                    _sessionManager.MarkCompacting(sessionId, projectPath);
                 }
                 else
                 {
-                    // Main agent tool activity with no subagent running → Busy.
-                    _sessionManager.UpdateStatus(sessionId, SessionStatus.Busy);
-                    // Reset the watchdog timer on activity to keep the light red
-                    // while Claude Code is actively working
-                    _sessionManager.ResetBusyTimeout(sessionId);
+                    _sessionManager.AddSession(sessionId, projectPath);
                 }
+                break;
+            case "busy":
+                HandleBusy(sessionId, toolName, hookEvent, toolUseId);
                 break;
             case "subagent-stop":
                 // SubagentStop fires when a subagent finishes. If the payload
@@ -171,19 +163,18 @@ public class HookServer : IDisposable
                 break;
             case "idle":
                 // Stop / StopFailure: turn ended — clear any subagent flag too.
-                _sessionManager.SetSubagentActive(sessionId, false);
-                _sessionManager.UpdateStatus(sessionId, SessionStatus.Idle);
+                HandleTurnEnd(sessionId, "stop");
                 break;
             case "interactive":
-                // Notification (waiting for user input) → Idle (green)
-                _sessionManager.SetSubagentActive(sessionId, false);
-                _sessionManager.UpdateStatus(sessionId, SessionStatus.Idle);
+                // Notification: conservatively keep current state unless the
+                // notification is clearly a user-action-required prompt
+                // (TASKS.md §3.3). Avoids flickering to Idle on background
+                // notifications.
+                HandleNotification(sessionId, message, title, notifType);
                 break;
             case "stopfailure":
                 // StopFailure fires when a turn ends on API error (rate_limit, etc.)
-                // The turn has ended, so set to Idle
-                _sessionManager.SetSubagentActive(sessionId, false);
-                _sessionManager.UpdateStatus(sessionId, SessionStatus.Idle);
+                HandleTurnEnd(sessionId, "stopfailure");
                 break;
             case "end":
                 _sessionManager.RemoveSession(sessionId);
@@ -192,6 +183,130 @@ public class HookServer : IDisposable
                 System.Diagnostics.Debug.WriteLine($"Unknown route: /{route}");
                 break;
         }
+    }
+
+    /// <summary>
+    /// Handle a /busy route event. The originating hook event name (§3.4)
+    /// disambiguates UserPromptSubmit / PreToolUse / PostToolUse, which all
+    /// share the busy endpoint. tool_use_id pairs Pre/PostToolUse for
+    /// ActiveTools tracking (§3.2) and idempotency.
+    /// </summary>
+    private void HandleBusy(string sessionId, string toolName, string hookEvent, string toolUseId)
+    {
+        // PreToolUse with tool_name "Agent" means the main agent is launching a
+        // subagent. The main agent then waits, so we mark a subagent as active
+        // (main → Idle, subagent row → Working) instead of marking the main
+        // session Busy. (Subagent handling is unchanged by this task.)
+        if (string.Equals(toolName, "Agent", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(hookEvent, "PostToolUse", StringComparison.OrdinalIgnoreCase))
+        {
+            _sessionManager.SetSubagentActive(sessionId, true);
+            return;
+        }
+
+        if (_sessionManager.IsSubagentActive(sessionId))
+        {
+            // A subagent is running, so the main agent is waiting — main stays
+            // Idle. The main agent can fire PreToolUse / PostToolUse while a
+            // subagent runs (internal activity, completion notifications,
+            // subagent-result handling). Treating that as main Busy would
+            // briefly turn the main indicator red even though the main agent is
+            // idle. Do NOT clear the subagent flag here.
+            _sessionManager.ResetBusyTimeout(sessionId);
+            return;
+        }
+
+        // Dispatch by originating hook event (§3.4). Fall back to the legacy
+        // toolName-based inference when hookEvent is absent (older hook proxy).
+        if (string.IsNullOrEmpty(hookEvent))
+        {
+            _sessionManager.UpdateStatus(sessionId, SessionStatus.Busy);
+            _sessionManager.ResetBusyTimeout(sessionId);
+            return;
+        }
+
+        switch (hookEvent)
+        {
+            case "PreToolUse":
+                // Track the in-flight tool so the watchdog applies its long
+                // timeout tier (§3.2), then mark Busy.
+                _sessionManager.TrackTool(sessionId, toolUseId);
+                _sessionManager.UpdateStatus(sessionId, SessionStatus.Busy);
+                _sessionManager.ResetBusyTimeout(sessionId);
+                break;
+            case "PostToolUse":
+                // Tool finished — untrack it. Stay Busy (the turn continues);
+                // just refresh the timer so the short tier reapplies if no
+                // tools remain in flight.
+                _sessionManager.UntrackTool(sessionId, toolUseId);
+                _sessionManager.ResetBusyTimeout(sessionId);
+                break;
+            default:
+                // UserPromptSubmit (or any other busy event) → Busy.
+                _sessionManager.UpdateStatus(sessionId, SessionStatus.Busy);
+                _sessionManager.ResetBusyTimeout(sessionId);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Handle a Notification (§3.3). Only switch to Idle when the notification
+    /// is recognizably a user-action-required prompt (permission, input). For
+    /// background notifications or unclassifiable payloads, conservatively keep
+    /// the current state and refresh the busy timer to avoid flicker. The raw
+    /// payload fields are logged for later Phase-3 classification.
+    /// </summary>
+    private void HandleNotification(string sessionId, string message, string title, string notifType)
+    {
+        System.Diagnostics.Debug.WriteLine(
+            $"[CC-Pulse] notification: session={sessionId} type={notifType} title={title} message={message}");
+
+        if (IsUserActionRequired(message, title, notifType))
+        {
+            _sessionManager.SetSubagentActive(sessionId, false);
+            _sessionManager.UpdateStatus(sessionId, SessionStatus.Idle);
+        }
+        else
+        {
+            // Conservatively keep current state; just keep the timer alive.
+            _sessionManager.ResetBusyTimeout(sessionId);
+        }
+    }
+
+    /// <summary>
+    /// Heuristic: does this Notification represent a prompt that blocks on user
+    /// action (permission approval, input request)? Matches common Claude Code
+    /// permission/notification wording. When uncertain, returns false so the
+    /// state is preserved rather than flickering to Idle.
+    /// </summary>
+    private static bool IsUserActionRequired(string message, string title, string notifType)
+    {
+        var hay = $"{notifType}{title}{message}".ToLowerInvariant();
+        // Permission approvals and explicit input requests block the turn.
+        if (hay.Contains("permission") || hay.Contains("approve")
+            || hay.Contains("allow") || hay.Contains("denied")
+            || hay.Contains("waiting for your") || hay.Contains("needs your input")
+            || hay.Contains("can you") && hay.Contains("?"))
+        {
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Handle Stop / StopFailure: the turn has ended. If tools are still marked
+    /// in flight (a PostToolUse was lost), log the anomaly (§3.6) before
+    /// resetting to Idle. Always clears subagent state and active tools.
+    /// </summary>
+    private void HandleTurnEnd(string sessionId, string reason)
+    {
+        if (_sessionManager.HasActiveOperations(sessionId))
+        {
+            _sessionManager.LogAnomaly(sessionId, $"stop_with_active_ops ({reason})");
+        }
+        _sessionManager.SetSubagentActive(sessionId, false);
+        _sessionManager.ClearActiveTools(sessionId);
+        _sessionManager.UpdateStatus(sessionId, SessionStatus.Idle);
     }
 
     private static async Task<string> ReadRequestBodyAsync(HttpListenerRequest request, CancellationToken ct)

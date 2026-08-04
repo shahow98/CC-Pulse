@@ -23,9 +23,13 @@ namespace ClaudeMonitor.HookProxy;
 internal static class Program
 {
     private const string HookServerUrl = "http://localhost:8765";
+    // 1s timeout per TASKS.md §5 (≤1s). The POST is synchronous because the
+    // process must outlive the request (fire-and-forget loses the event when
+    // the runtime tears down orphaned Tasks on exit). The HookServer handles
+    // requests in <10ms, so 1s is ample and bounds the worst-case block.
     private static readonly HttpClient _httpClient = new()
     {
-        Timeout = TimeSpan.FromSeconds(2),
+        Timeout = TimeSpan.FromSeconds(1),
     };
 
     static int Main(string[] args)
@@ -44,6 +48,17 @@ internal static class Program
             var sessionId = "";
             var projectPath = "";
             var toolName = "";
+            // Standardized metadata per TASKS.md §3.4: carry the originating
+            // hook event name, tool_use_id (for Pre/PostToolUse pairing and
+            // idempotency), source (SessionStart: startup/resume/clear/compact),
+            // and Notification fields (message/title/type) so the HookServer
+            // can route precisely instead of guessing from toolName.
+            var hookEvent = "";
+            var toolUseId = "";
+            var source = "";
+            var message = "";
+            var title = "";
+            var notifType = "";
 
             if (!string.IsNullOrEmpty(input))
             {
@@ -58,6 +73,24 @@ internal static class Program
                     // When it is "Agent", the main agent is launching a subagent.
                     if (doc.RootElement.TryGetProperty("tool_name", out var tnProp))
                         toolName = tnProp.GetString() ?? "";
+                    // hook_event_name is present on every hook payload (e.g.
+                    // "UserPromptSubmit", "PreToolUse", "SessionStart").
+                    if (doc.RootElement.TryGetProperty("hook_event_name", out var heProp))
+                        hookEvent = heProp.GetString() ?? "";
+                    // tool_use_id pairs PreToolUse with PostToolUse for the
+                    // same invocation, enabling ActiveTools tracking + idempotency.
+                    if (doc.RootElement.TryGetProperty("tool_use_id", out var tuiProp))
+                        toolUseId = tuiProp.GetString() ?? "";
+                    // source disambiguates SessionStart (startup/resume/clear/compact).
+                    if (doc.RootElement.TryGetProperty("source", out var srcProp))
+                        source = srcProp.GetString() ?? "";
+                    // Notification payload fields, retained for classification.
+                    if (doc.RootElement.TryGetProperty("message", out var msgProp))
+                        message = msgProp.GetString() ?? "";
+                    if (doc.RootElement.TryGetProperty("title", out var titleProp))
+                        title = titleProp.GetString() ?? "";
+                    if (doc.RootElement.TryGetProperty("type", out var typeProp))
+                        notifType = typeProp.GetString() ?? "";
                 }
                 catch (JsonException)
                 {
@@ -81,11 +114,24 @@ internal static class Program
             var payload = new Dictionary<string, string>
             {
                 ["sessionId"] = sessionId,
+                ["endpoint"] = endpoint,
             };
             if (!string.IsNullOrEmpty(projectPath))
                 payload["projectPath"] = projectPath;
             if (!string.IsNullOrEmpty(toolName))
                 payload["toolName"] = toolName;
+            if (!string.IsNullOrEmpty(hookEvent))
+                payload["hookEvent"] = hookEvent;
+            if (!string.IsNullOrEmpty(toolUseId))
+                payload["toolUseId"] = toolUseId;
+            if (!string.IsNullOrEmpty(source))
+                payload["source"] = source;
+            if (!string.IsNullOrEmpty(message))
+                payload["message"] = message;
+            if (!string.IsNullOrEmpty(title))
+                payload["title"] = title;
+            if (!string.IsNullOrEmpty(notifType))
+                payload["type"] = notifType;
 
             var json = JsonSerializer.Serialize(payload);
             var content = new StringContent(json, Encoding.UTF8, "application/json");
@@ -94,9 +140,19 @@ internal static class Program
             // Fire-and-forget (_ = PostAsync) causes the process to exit before
             // the HTTP request is sent, since the runtime doesn't wait for
             // orphaned Tasks when the process terminates.
-            _ = _httpClient.PostAsync($"{HookServerUrl}/{endpoint}", content).Result;
-
-            return 0;
+            try
+            {
+                _ = _httpClient.PostAsync($"{HookServerUrl}/{endpoint}", content).Result;
+                return 0;
+            }
+            catch (Exception)
+            {
+                // HookServer unreachable — enqueue to local NDJSON queue so the
+                // event is replayed on next CC-Pulse launch (TASKS.md §5).
+                // Never block Claude Code: queue write is best-effort.
+                try { QueueManager.Enqueue(json); } catch { /* ignore */ }
+                return 1;
+            }
         }
         catch (Exception)
         {

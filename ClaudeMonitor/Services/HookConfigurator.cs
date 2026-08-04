@@ -400,7 +400,10 @@ public static class HookConfigurator
                             ["type"] = "command",
                             ["command"] = hookPath,
                             ["args"] = new JsonArray { suffix },
-                            ["timeout"] = 5,
+                            // 1s per TASKS.md §5. The hook proxy POSTs synchronously
+                            // and the HookServer responds in <10ms, so 1s is ample
+                            // while bounding the worst-case block on Claude Code.
+                            ["timeout"] = 1,
                         };
                     }
                     else
@@ -410,7 +413,7 @@ public static class HookConfigurator
                         {
                             ["type"] = "command",
                             ["command"] = $"\"{hookPath}\" hook {suffix}",
-                            ["timeout"] = 5,
+                            ["timeout"] = 1,
                         };
                     }
 
