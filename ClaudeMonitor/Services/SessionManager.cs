@@ -185,6 +185,10 @@ public class SessionManager : IDisposable
         session.Status = newStatus;
         session.LastUpdated = DateTime.Now;
 
+        FileLogger.Info(
+            $"hook {sessionId}: {oldStatus}->{newStatus} " +
+            $"activeOps={session.HasActiveOperations} subagent={session.SubagentActive}");
+
         // Manage the watchdog timer based on the new status
         if (newStatus == SessionStatus.Busy)
         {
@@ -608,6 +612,7 @@ public class SessionManager : IDisposable
     {
         if (!_sessions.TryGetValue(sessionId, out var session)) return;
         session.RecordTranscriptToolUse(toolUseId);
+        FileLogger.Info($"transcript tool_use {sessionId}: id={toolUseId} hookTracked={session.IsToolHookTracked(toolUseId)}");
 
         // Detect a tool_use the hook path never announced (hook missed).
         // ActiveTools (hook-tracked) and TranscriptActiveTools are separate
@@ -631,6 +636,7 @@ public class SessionManager : IDisposable
     {
         if (!_sessions.TryGetValue(sessionId, out var session)) return;
         session.RecordTranscriptToolResult(toolUseId);
+        FileLogger.Info($"transcript tool_result {sessionId}: id={toolUseId} unpaired={session.TranscriptHasUnpairedToolUse}");
         Reconcile(sessionId);
     }
 
@@ -651,8 +657,13 @@ public class SessionManager : IDisposable
     {
         if (!_sessions.TryGetValue(sessionId, out var session)) return;
         if (session.HookBusyAtUtc is not null && atUtc < session.HookBusyAtUtc.Value)
+        {
+            FileLogger.Info($"transcript turn_end {sessionId}: STALE stop at {atUtc:o} ignored (hook Busy since {session.HookBusyAtUtc:o})");
             return;
+        }
+        var hadUnpaired = session.TranscriptHasUnpairedToolUse;
         session.RecordTranscriptTurnEnd(atUtc);
+        FileLogger.Info($"transcript turn_end {sessionId}: at {atUtc:o} hadUnpaired={hadUnpaired}");
         Reconcile(sessionId);
     }
 
@@ -784,6 +795,14 @@ public class SessionManager : IDisposable
         session.StateSource = source;
         session.Status = newStatus;
         session.LastUpdated = DateTime.Now;
+
+        // Reconciler-driven transitions are the most diagnostic: they show
+        // the transcript overriding the hook (or vice versa). Log every one
+        // so the state-machine trace is reconstructable from the log file.
+        FileLogger.Info(
+            $"reconcile {sessionId}: {oldStatus}->{newStatus} source={source} " +
+            $"hook={session.HookState} unpaired={session.TranscriptHasUnpairedToolUse} " +
+            $"stopUtc={session.TranscriptLastStopUtc?.ToString("o") ?? "null"}");
 
         if (newStatus == SessionStatus.Busy)
         {

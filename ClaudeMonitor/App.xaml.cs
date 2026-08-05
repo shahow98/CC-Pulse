@@ -71,6 +71,8 @@ public partial class App : System.Windows.Application
         // against a dead HookServer while CC-Pulse is closed.
         EnsureHooksConfigured();
 
+        FileLogger.Info("=== CC-Pulse starting ===");
+
         // Initialize core services
         _sessionManager = new SessionManager();
         _hookServer = new HookServer(_sessionManager);
@@ -304,6 +306,7 @@ public partial class App : System.Windows.Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        FileLogger.Info("=== CC-Pulse exiting ===");
         // Remove CC-Pulse hooks from Claude Code settings so they don't linger
         // (and fire against a dead HookServer) while CC-Pulse is closed.
         // They are re-inserted on the next launch by EnsureHooksConfigured.

@@ -305,6 +305,8 @@ public class SessionInfo : INotifyPropertyChanged
         }
         System.Diagnostics.Debug.WriteLine(
             $"[CC-Pulse] anomaly: {record.Type} session={SessionId} {record.Detail}");
+        Services.FileLogger.Anomaly(
+            $"{record.Type} session={SessionId} {record.Detail}");
     }
 
     /// <summary>Snapshot of recent anomalies (newest last).</summary>

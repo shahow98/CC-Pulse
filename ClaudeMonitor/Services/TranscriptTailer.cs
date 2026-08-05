@@ -83,6 +83,8 @@ public class TranscriptTailer : IDisposable
         var transcriptPath = ClaudePaths.ResolveTranscriptPath(projectPath, sessionId);
         if (transcriptPath is null) return;
 
+        FileLogger.Info($"tailer activate {sessionId}: {transcriptPath} exists={File.Exists(transcriptPath)}");
+
         // Idempotent: if already tailing this exact path, nothing to do.
         if (_tails.TryGetValue(sessionId, out var existing) &&
             string.Equals(existing.Path, transcriptPath, StringComparison.OrdinalIgnoreCase))
@@ -282,6 +284,7 @@ public class TranscriptTailer : IDisposable
                     // tailer just needs to avoid replaying history.
                     if (_offset > fs.Length)
                     {
+                        FileLogger.Warn($"tailer {Path}: file shrunk (offset={_offset} > len={fs.Length}), jumping to EOF (rotation/compact)");
                         _offset = fs.Length;
                         _pending.Clear();
                     }
