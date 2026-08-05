@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
@@ -80,6 +81,241 @@ public class SessionInfo : INotifyPropertyChanged
         }
     }
 
+    // ──────────────────────────────────────────────────────────────────
+    //  Phase 2: Transcript-derived state (TASKS.md §4)
+    // ──────────────────────────────────────────────────────────────────
+    //  The transcript JSONL is the authoritative source of truth; hooks are
+    //  low-latency triggers. These fields hold what the transcript observed,
+    //  kept separate from the hook-driven fields above so the reconciler can
+    //  compare and resolve conflicts. The final UI-bound <see cref="Status"/>
+    //  is derived by the reconciler from both sources.
+
+    /// <summary>
+    /// tool_use_ids observed in the transcript (assistant.message.content[]
+    /// with type "tool_use") that have not yet been paired with a matching
+    /// tool_result (user.message.content[] with the same tool_use_id). When
+    /// non-empty, the main agent is authoritatively Busy. Guarded by
+    /// <see cref="_transcriptToolsLock"/>.
+    /// </summary>
+    private readonly HashSet<string> _transcriptActiveTools = new();
+    private readonly object _transcriptToolsLock = new();
+
+    /// <summary>
+    /// Timestamp (UTC) of the most recent <c>system</c> entry with
+    /// <c>subtype=="stop_hook_summary"</c> seen in the transcript — the
+    /// authoritative turn-end signal (current Claude Code versions no longer
+    /// write a top-level <c>result</c> entry). Null until the first turn end
+    /// is observed. Used by the reconciler to authoritatively set Idle.
+    /// </summary>
+    private DateTime? _transcriptLastStopUtc;
+    private readonly object _transcriptStopLock = new();
+
+    /// <summary>
+    /// The main-agent status as set by the hook path. The reconciler reads
+    /// this (plus the transcript fields) to derive the final UI-bound
+    /// <see cref="Status"/>. Kept distinct from <see cref="Status"/> so the
+    /// two sources can be compared and conflicts logged as anomalies.
+    /// </summary>
+    private SessionStatus _hookState = SessionStatus.Idle;
+
+    /// <summary>
+    /// When the hook path last set <see cref="HookState"/> to Busy. Used by
+    /// the reconciler's grace-period logic: a hook-driven Busy is trusted for
+    /// up to <c>GracePeriodSeconds</c> while waiting for the transcript to
+    /// confirm. Null when HookState is Idle or after confirmation.
+    /// </summary>
+    private DateTime? _hookBusyAtUtc;
+
+    /// <summary>
+    /// True once the reconciler has logged a <c>grace_expired</c> anomaly for
+    /// the current hook-driven Busy period. Reset to false whenever the hook
+    /// path (re)sets Busy, so the anomaly is logged ONCE per grace expiry
+    /// rather than on every 2s reconcile tick while the state persists.
+    /// </summary>
+    private bool _graceExpiredLogged;
+
+    /// <summary>
+    /// Which source determined the current <see cref="Status"/>. Reported as
+    /// the <c>source</c> field in the output structure (TASKS.md §6).
+    /// </summary>
+    private StateSource _stateSource = StateSource.Hook;
+
+    /// <summary>
+    /// Recent anomalies detected by the reconciler (TASKS.md §3.6/§4.3),
+    /// newest last. Bounded to avoid unbounded growth; older entries are
+    /// dropped. Guarded by <see cref="_anomaliesLock"/>.
+    /// </summary>
+    private readonly List<AnomalyRecord> _anomalies = new();
+    private readonly object _anomaliesLock = new();
+    private const int MaxAnomaliesKept = 50;
+
+    /// <summary>
+    /// tool_use_ids observed in the transcript that have not yet been paired
+    /// with a tool_result. When non-empty, the main agent is authoritatively
+    /// Busy (transcript is the source of truth).
+    /// </summary>
+    public bool TranscriptHasUnpairedToolUse
+    {
+        get
+        {
+            lock (_transcriptToolsLock)
+            {
+                return _transcriptActiveTools.Count > 0;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Timestamp (UTC) of the most recent transcript turn-end signal, or null
+    /// if none has been observed yet.
+    /// </summary>
+    public DateTime? TranscriptLastStopUtc
+    {
+        get
+        {
+            lock (_transcriptStopLock)
+            {
+                return _transcriptLastStopUtc;
+            }
+        }
+    }
+
+    /// <summary>The main-agent status as last set by the hook path.</summary>
+    public SessionStatus HookState
+    {
+        get => _hookState;
+        set => SetField(ref _hookState, value);
+    }
+
+    /// <summary>When the hook path last marked the session Busy (UTC), for grace-period logic.</summary>
+    public DateTime? HookBusyAtUtc
+    {
+        get => _hookBusyAtUtc;
+        set => SetField(ref _hookBusyAtUtc, value);
+    }
+
+    /// <summary>
+    /// Whether a <c>grace_expired</c> anomaly has already been logged for the
+    /// current hook-driven Busy period. See <see cref="MarkGraceExpiredLogged"/>
+    /// and <see cref="ResetGraceExpiredFlag"/>.
+    /// </summary>
+    public bool GraceExpiredLogged => _graceExpiredLogged;
+
+    /// <summary>Mark that grace_expired was logged for this Busy period (suppress repeats).</summary>
+    public void MarkGraceExpiredLogged() => _graceExpiredLogged = true;
+
+    /// <summary>Reset the grace_expired flag (call when hook (re)sets Busy).</summary>
+    public void ResetGraceExpiredFlag() => _graceExpiredLogged = false;
+
+    /// <summary>Which source determined the current Status.</summary>
+    public StateSource StateSource
+    {
+        get => _stateSource;
+        set => SetField(ref _stateSource, value);
+    }
+
+    /// <summary>
+    /// Record a tool_use observed in the transcript (assistant entry). Pairs
+    /// with <see cref="RecordTranscriptToolResult"/> by tool_use_id. Idempotent.
+    /// </summary>
+    public void RecordTranscriptToolUse(string toolUseId)
+    {
+        if (string.IsNullOrEmpty(toolUseId)) return;
+        lock (_transcriptToolsLock)
+        {
+            _transcriptActiveTools.Add(toolUseId);
+        }
+    }
+
+    /// <summary>
+    /// Record a tool_result observed in the transcript (user entry), pairing
+    /// the corresponding tool_use_id. Idempotent; ignores unknown ids.
+    /// </summary>
+    public void RecordTranscriptToolResult(string toolUseId)
+    {
+        if (string.IsNullOrEmpty(toolUseId)) return;
+        lock (_transcriptToolsLock)
+        {
+            _transcriptActiveTools.Remove(toolUseId);
+        }
+    }
+
+    /// <summary>
+    /// Record that the transcript observed a turn-end signal
+    /// (system.stop_hook_summary). Clears any unpaired tool_use ids and, if
+    /// any were present, logs an anomaly (turn ended with tools still in
+    /// flight). Returns true if unpaired tools were cleared.
+    /// </summary>
+    public bool RecordTranscriptTurnEnd(DateTime atUtc)
+    {
+        bool hadUnpaired;
+        lock (_transcriptToolsLock)
+        {
+            hadUnpaired = _transcriptActiveTools.Count > 0;
+            _transcriptActiveTools.Clear();
+        }
+        lock (_transcriptStopLock)
+        {
+            _transcriptLastStopUtc = atUtc;
+        }
+        if (hadUnpaired)
+        {
+            AddAnomaly(new AnomalyRecord(
+                "stop_with_unpaired_tool_use", atUtc,
+                "transcript turn-end (stop_hook_summary) seen with unpaired tool_use ids"));
+        }
+        return hadUnpaired;
+    }
+
+    /// <summary>
+    /// Clear the transcript turn-end marker. Called when the hook path signals
+    /// the start of a new turn (Busy) so that a stale stop from the PREVIOUS
+    /// turn no longer authoritatively forces Idle while the new turn's
+    /// tool_use has not yet landed on disk (§4.4 rule 2 vs rule 3). Without
+    /// this, <see cref="TranscriptLastStopUtc"/> — once set, never null again —
+    /// would permanently suppress the hook-driven grace-period Busy, and the
+    /// main agent could never show Busy within the grace window after the
+    /// first turn.
+    /// </summary>
+    public void ClearTranscriptTurnEnd()
+    {
+        lock (_transcriptStopLock)
+        {
+            _transcriptLastStopUtc = null;
+        }
+    }
+
+    /// <summary>Clear all transcript-tracked tool ids (e.g. on session reset).</summary>
+    public void ClearTranscriptTools()
+    {
+        lock (_transcriptToolsLock)
+        {
+            _transcriptActiveTools.Clear();
+        }
+    }
+
+    /// <summary>Add an anomaly record, bounding the list to <see cref="MaxAnomaliesKept"/>.</summary>
+    public void AddAnomaly(AnomalyRecord record)
+    {
+        lock (_anomaliesLock)
+        {
+            _anomalies.Add(record);
+            if (_anomalies.Count > MaxAnomaliesKept)
+                _anomalies.RemoveAt(0);
+        }
+        System.Diagnostics.Debug.WriteLine(
+            $"[CC-Pulse] anomaly: {record.Type} session={SessionId} {record.Detail}");
+    }
+
+    /// <summary>Snapshot of recent anomalies (newest last).</summary>
+    public IReadOnlyList<AnomalyRecord> GetAnomalies()
+    {
+        lock (_anomaliesLock)
+        {
+            return _anomalies.ToArray();
+        }
+    }
+
     /// <summary>Track an in-flight tool_use_id (PreToolUse). Idempotent.</summary>
     public void TrackTool(string toolUseId)
     {
@@ -87,6 +323,21 @@ public class SessionInfo : INotifyPropertyChanged
         lock (_activeToolsLock)
         {
             _activeTools.Add(toolUseId);
+        }
+    }
+
+    /// <summary>
+    /// Whether a specific tool_use_id is currently tracked by the hook path
+    /// (PreToolUse fired, PostToolUse not yet). Used by the reconciler to
+    /// detect <c>hook_missed</c> anomalies precisely: a transcript tool_use
+    /// whose id is NOT in this set arrived without a PreToolUse hook.
+    /// </summary>
+    public bool IsToolHookTracked(string toolUseId)
+    {
+        if (string.IsNullOrEmpty(toolUseId)) return false;
+        lock (_activeToolsLock)
+        {
+            return _activeTools.Contains(toolUseId);
         }
     }
 

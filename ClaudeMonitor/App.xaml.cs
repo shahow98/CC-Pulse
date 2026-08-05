@@ -28,6 +28,7 @@ public partial class App : System.Windows.Application
     private TrayManager? _trayManager;
     private StatusWindow? _statusWindow;
     private SubagentWatcher? _subagentWatcher;
+    private TranscriptTailer? _transcriptTailer;
 
     private static readonly string ClaudeDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
@@ -83,6 +84,19 @@ public partial class App : System.Windows.Application
         _subagentWatcher = new SubagentWatcher(_sessionManager);
         _sessionManager.SetSubagentWatcher(_subagentWatcher);
         _subagentWatcher.Start();
+
+        // TranscriptTailer (Phase 2 §2/§4): tails each session's main
+        // transcript JSONL and reports authoritatively-observed tool_use /
+        // tool_result / turn-end to the SessionManager. The transcript is the
+        // source of truth; hooks are low-latency triggers. The reconciler
+        // (started below) fuses the two, overriding hook-driven state when
+        // the transcript disagrees. Tailer reads only NEW lines (offset
+        // initialized to EOF), so launching mid-session does not replay
+        // history.
+        _transcriptTailer = new TranscriptTailer(_sessionManager);
+        _sessionManager.SetTranscriptTailer(_transcriptTailer);
+        _transcriptTailer.Start();
+        _sessionManager.StartReconciler();
 
         // Wire up tray events
         _trayManager.ExitRequested += OnExitRequested;
@@ -304,6 +318,7 @@ public partial class App : System.Windows.Application
 
         // Clean up resources in reverse order
         _hookServer?.Dispose();
+        _transcriptTailer?.Dispose();
         _subagentWatcher?.Dispose();
         _trayManager?.Dispose();
         _sessionManager?.Dispose();

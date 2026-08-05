@@ -21,6 +21,11 @@ publish/
 ## CodeGraph index (tooling artifact)
 .codegraph/
 
+## Claude Code session/tooling artifacts (workflows, transcripts, etc.)
+.claude/wf-*.cjs
+.claude/workflows/
+.claude/jobs/
+
 ## OS
 Thumbs.db
 Desktop.ini
