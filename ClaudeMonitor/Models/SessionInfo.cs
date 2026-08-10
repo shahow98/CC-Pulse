@@ -67,6 +67,30 @@ public class SessionInfo : INotifyPropertyChanged
     private readonly object _activeToolsLock = new();
 
     /// <summary>
+    /// tool_use_ids observed in the transcript that are waiting for the
+    /// (slower) PreToolUse hook to confirm them. The hook path lags the
+    /// transcript by ~80-200ms (hook exe cold-start + HTTP round-trip vs.
+    /// direct transcript write), so a transcript tool_use typically arrives
+    /// BEFORE its PreToolUse. Checking <see cref="_activeTools"/> at that
+    /// instant would always read false and falsely flag <c>hook_missed</c>.
+    /// Instead we record the id here with the observation time and give the
+    /// hook a grace window (<see cref="PendingHookConfirmTimeoutMs"/>); if
+    /// <see cref="TrackTool"/> clears it in time, the hook confirmed. If it
+    /// still sits here past the timeout, the PreToolUse hook was genuinely
+    /// lost and the reconciler logs <c>hook_missed</c>. Guarded by
+    /// <see cref="_pendingHookConfirmsLock"/>.
+    /// </summary>
+    private readonly Dictionary<string, DateTime> _pendingHookConfirms = new();
+    private readonly object _pendingHookConfirmsLock = new();
+
+    /// <summary>
+    /// How long (ms) after the transcript sees a tool_use to wait for the
+    /// PreToolUse hook before declaring it missed. Covers the observed
+    /// ~200ms hook lag with margin.
+    /// </summary>
+    private const int PendingHookConfirmTimeoutMs = 500;
+
+    /// <summary>
     /// True when there are in-flight main-agent tool calls (PreToolUse without
     /// a matching PostToolUse). Drives the watchdog's long-timeout branch.
     /// </summary>
@@ -77,6 +101,22 @@ public class SessionInfo : INotifyPropertyChanged
             lock (_activeToolsLock)
             {
                 return _activeTools.Count > 0;
+            }
+        }
+    }
+
+    /// <summary>
+    /// True when at least one transcript tool_use is still awaiting a
+    /// PreToolUse hook confirmation within the grace window. Used to suppress
+    /// <c>grace_expired</c> while the hook is simply lagging (not lost).
+    /// </summary>
+    public bool HasPendingHookConfirm
+    {
+        get
+        {
+            lock (_pendingHookConfirmsLock)
+            {
+                return _pendingHookConfirms.Count > 0;
             }
         }
     }
@@ -125,6 +165,18 @@ public class SessionInfo : INotifyPropertyChanged
     /// confirm. Null when HookState is Idle or after confirmation.
     /// </summary>
     private DateTime? _hookBusyAtUtc;
+
+    /// <summary>
+    /// True once the transcript has confirmed the current hook-driven Busy
+    /// period by observing a tool_use (or, for UserPromptSubmit, any
+    /// transcript activity). The hook path lags the transcript, so a Busy is
+    /// normally confirmed within the grace window. This flag lets the
+    /// reconciler distinguish "hook Busy, transcript never confirmed" (a
+    /// genuine grace_expired) from "hook Busy, transcript confirmed, then the
+    /// tool finished and we are in a between-tools gap or waiting for Stop"
+    /// (NOT an anomaly). Reset to false whenever the hook path (re)sets Busy.
+    /// </summary>
+    private bool _hookBusyConfirmedByTranscript;
 
     /// <summary>
     /// True once the reconciler has logged a <c>grace_expired</c> anomaly for
@@ -206,6 +258,23 @@ public class SessionInfo : INotifyPropertyChanged
 
     /// <summary>Reset the grace_expired flag (call when hook (re)sets Busy).</summary>
     public void ResetGraceExpiredFlag() => _graceExpiredLogged = false;
+
+    /// <summary>
+    /// Whether the transcript has confirmed the current hook-driven Busy
+    /// period. See <see cref="MarkHookBusyConfirmedByTranscript"/> and
+    /// <see cref="ResetHookBusyConfirmed"/>.
+    /// </summary>
+    public bool HookBusyConfirmedByTranscript => _hookBusyConfirmedByTranscript;
+
+    /// <summary>
+    /// Mark that the transcript confirmed the current hook Busy (a tool_use
+    /// arrived). Suppresses grace_expired for the rest of this Busy period —
+    /// a later between-tools gap or a wait-for-Stop is not an anomaly.
+    /// </summary>
+    public void MarkHookBusyConfirmedByTranscript() => _hookBusyConfirmedByTranscript = true;
+
+    /// <summary>Reset the confirmation flag (call when hook (re)sets Busy).</summary>
+    public void ResetHookBusyConfirmed() => _hookBusyConfirmedByTranscript = false;
 
     /// <summary>Which source determined the current Status.</summary>
     public StateSource StateSource
@@ -292,6 +361,8 @@ public class SessionInfo : INotifyPropertyChanged
         {
             _transcriptActiveTools.Clear();
         }
+        // Session reset also discards pending hook confirmations.
+        ClearPendingHookConfirms();
     }
 
     /// <summary>Add an anomaly record, bounding the list to <see cref="MaxAnomaliesKept"/>.</summary>
@@ -325,6 +396,69 @@ public class SessionInfo : INotifyPropertyChanged
         lock (_activeToolsLock)
         {
             _activeTools.Add(toolUseId);
+        }
+        // The PreToolUse hook arrived for this id — it is no longer "pending
+        // confirmation"; clear any entry the transcript path recorded so the
+        // reconciler does not later flag it as hook_missed.
+        ClearPendingHookConfirm(toolUseId);
+    }
+
+    /// <summary>
+    /// Record a tool_use the transcript just observed, starting the grace
+    /// window for its PreToolUse hook to arrive. Called by the transcript
+    /// path instead of immediately flagging hook_missed (the hook lags the
+    /// transcript; see <see cref="_pendingHookConfirms"/>).
+    /// </summary>
+    public void MarkPendingHookConfirm(string toolUseId, DateTime observedAtUtc)
+    {
+        if (string.IsNullOrEmpty(toolUseId)) return;
+        lock (_pendingHookConfirmsLock)
+        {
+            _pendingHookConfirms[toolUseId] = observedAtUtc;
+        }
+    }
+
+    /// <summary>
+    /// Clear a pending confirmation for an id (the PreToolUse hook arrived).
+    /// </summary>
+    public void ClearPendingHookConfirm(string toolUseId)
+    {
+        if (string.IsNullOrEmpty(toolUseId)) return;
+        lock (_pendingHookConfirmsLock)
+        {
+            _pendingHookConfirms.Remove(toolUseId);
+        }
+    }
+
+    /// <summary>
+    /// Remove and return the ids whose grace window has elapsed without a
+    /// PreToolUse hook arriving — these are genuine hook misses. Called by
+    /// the reconciler tick.
+    /// </summary>
+    public List<string> DrainExpiredPendingHookConfirms(DateTime nowUtc)
+    {
+        var expired = new List<string>();
+        lock (_pendingHookConfirmsLock)
+        {
+            if (_pendingHookConfirms.Count == 0) return expired;
+            var cutoff = nowUtc.AddMilliseconds(-PendingHookConfirmTimeoutMs);
+            foreach (var kvp in _pendingHookConfirms)
+            {
+                if (kvp.Value <= cutoff)
+                    expired.Add(kvp.Key);
+            }
+            foreach (var id in expired)
+                _pendingHookConfirms.Remove(id);
+        }
+        return expired;
+    }
+
+    /// <summary>Clear all pending hook confirmations (on turn end / reset).</summary>
+    public void ClearPendingHookConfirms()
+    {
+        lock (_pendingHookConfirmsLock)
+        {
+            _pendingHookConfirms.Clear();
         }
     }
 
@@ -360,6 +494,9 @@ public class SessionInfo : INotifyPropertyChanged
         {
             _activeTools.Clear();
         }
+        // A turn end also discards any hook confirmations still pending — the
+        // turn is over, so a late/missing PreToolUse is no longer actionable.
+        ClearPendingHookConfirms();
     }
 
     public SessionInfo()

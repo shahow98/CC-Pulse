@@ -156,10 +156,20 @@ public class SessionManager : IDisposable
         // the first 2s. It also clears a stale TranscriptLastStopUtc from the
         // PREVIOUS turn so rule 2 does not suppress this turn hook-driven
         // Busy while the new tool_use has not yet landed on disk (§4.4).
+        //
+        // The confirmation flag (HookBusyConfirmedByTranscript) is reset ONLY
+        // on a genuine new Busy period (Idle->Busy). A Busy->Busy refresh
+        // (the next PreToolUse in the same turn) must PRESERVE it: the
+        // transcript often confirms the turn's first tool_use before the
+        // first PreToolUse hook even arrives (hook lags transcript), and each
+        // subsequent PreToolUse would otherwise wipe that confirmation and
+        // re-enable grace_expired mid-turn.
         if (newStatus == SessionStatus.Busy)
         {
             session.ClearTranscriptTurnEnd();
             session.ResetGraceExpiredFlag();
+            if (oldStatus != SessionStatus.Busy)
+                session.ResetHookBusyConfirmed();
             session.HookBusyAtUtc = DateTime.UtcNow;
         }
         else
@@ -612,17 +622,25 @@ public class SessionManager : IDisposable
     {
         if (!_sessions.TryGetValue(sessionId, out var session)) return;
         session.RecordTranscriptToolUse(toolUseId);
-        FileLogger.Info($"transcript tool_use {sessionId}: id={toolUseId} hookTracked={session.IsToolHookTracked(toolUseId)}");
+        var hookTracked = session.IsToolHookTracked(toolUseId);
+        FileLogger.Info($"transcript tool_use {sessionId}: id={toolUseId} hookTracked={hookTracked}");
 
-        // Detect a tool_use the hook path never announced (hook missed).
-        // ActiveTools (hook-tracked) and TranscriptActiveTools are separate
-        // sets; if transcript sees a tool the hook set lacks, the PreToolUse
-        // hook was lost.
-        if (!session.IsToolHookTracked(toolUseId))
+        // The transcript observing a tool_use confirms the current hook-driven
+        // Busy period. This suppresses grace_expired for the rest of the turn:
+        // once the hook Busy has been confirmed, a later between-tools gap or
+        // a wait-for-Stop is normal, not a lost confirmation.
+        session.MarkHookBusyConfirmedByTranscript();
+
+        // The hook path lags the transcript by ~80-200ms (hook exe cold-start
+        // + HTTP round-trip vs. direct transcript write), so a transcript
+        // tool_use usually arrives BEFORE its PreToolUse. Do NOT flag
+        // hook_missed here — that would fire on nearly every tool. Instead
+        // record the id with a grace window; TrackTool clears it when the
+        // PreToolUse arrives, and the reconciler tick flags it as hook_missed
+        // only if the window elapses with no confirmation (a genuine loss).
+        if (!hookTracked)
         {
-            session.AddAnomaly(new AnomalyRecord(
-                "hook_missed", DateTime.UtcNow,
-                $"transcript tool_use {toolUseId} not preceded by a PreToolUse hook"));
+            session.MarkPendingHookConfirm(toolUseId, DateTime.UtcNow);
         }
 
         Reconcile(sessionId);
@@ -691,6 +709,20 @@ public class SessionManager : IDisposable
         if (session.SubagentActive) return;
 
         var now = DateTime.UtcNow;
+
+        // Drain transcript tool_uses whose PreToolUse hook grace window has
+        // elapsed without confirmation. These are genuine hook misses (the
+        // hook lag of ~200ms is well within the window, so a surviving entry
+        // means the PreToolUse was truly lost). Logged here so both the 2s
+        // tick and event-driven reconciles surface them promptly.
+        var missed = session.DrainExpiredPendingHookConfirms(now);
+        foreach (var id in missed)
+        {
+            session.AddAnomaly(new AnomalyRecord(
+                "hook_missed", now,
+                $"transcript tool_use {id} not confirmed by a PreToolUse hook within grace window"));
+        }
+
         var derived = DeriveMainState(session, now, out var source);
 
         if (session.Status != derived)
@@ -752,13 +784,20 @@ public class SessionManager : IDisposable
                 // so the 2s reconcile tick does not flood the anomaly list.
                 //
                 // Suppress when the hook is actively tracking a tool
-                // (HasActiveOperations): PreToolUse fired and the transcript
-                // write is simply delayed — exactly what the grace period
-                // exists to tolerate, not a lost confirmation. A genuinely
-                // stuck tool is handled by the 30min watchdog
-                // (watchdog_timeout_with_active_ops); a truly unconfirmed hook
-                // (no active tool, no transcript line) still logs here.
-                if (!session.HasActiveOperations && !session.GraceExpiredLogged)
+                // (HasActiveOperations), when a transcript tool_use is still
+                // within its PreToolUse grace window (HasPendingHookConfirm),
+                // or when the transcript has ALREADY confirmed this Busy
+                // period (HookBusyConfirmedByTranscript). The first two cover
+                // hook lag; the third covers the normal between-tools gap or
+                // wait-for-Stop that follows a confirmed tool — not a lost
+                // confirmation. A genuinely stuck tool is handled by the 30min
+                // watchdog (watchdog_timeout_with_active_ops); a truly
+                // unconfirmed hook (no active tool, no pending confirmation,
+                // never confirmed, no transcript line) still logs here.
+                if (!session.HasActiveOperations
+                    && !session.HasPendingHookConfirm
+                    && !session.HookBusyConfirmedByTranscript
+                    && !session.GraceExpiredLogged)
                 {
                     session.AddAnomaly(new AnomalyRecord(
                         "grace_expired", nowUtc,
