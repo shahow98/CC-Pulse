@@ -107,12 +107,17 @@ public partial class App : System.Windows.Application
         // Start the HTTP hook server
         _hookServer.Start();
 
-        // Replay any hook events queued while CC-Pulse was not running
+        // Drop any hook events queued while CC-Pulse was not running
         // (TASKS.md §5): the hook proxy writes to ~/.claude/cc-pulse-queue.ndjson
-        // when the HookServer is unreachable. Re-deliver them now that the
-        // server is up, so state converges to what Claude Code actually did.
-        try { QueueManager.Replay(); }
-        catch (Exception ex) { Debug.WriteLine($"Queue replay failed: {ex.Message}"); }
+        // when the HookServer is unreachable. These events are HISTORICAL —
+        // by the time CC-Pulse restarts, the sessions that produced them may
+        // have ended. Re-delivering them would resurrect ghost sessions stuck
+        // in Busy (a trailing PreToolUse with no matching PostToolUse leaves
+        // activeOps true, so the 30-min watchdog tier keeps the phantom Busy).
+        // Discard the queue and start from the current real state: live
+        // SessionStart hooks build fresh sessions going forward.
+        try { QueueManager.Discard(); }
+        catch (Exception ex) { Debug.WriteLine($"Queue discard failed: {ex.Message}"); }
 
         // Show the status window
         _statusWindow.Show();

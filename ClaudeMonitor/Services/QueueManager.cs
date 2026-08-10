@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Net.Http;
 using System.Text;
 
 namespace ClaudeMonitor.Services;
@@ -11,25 +10,29 @@ namespace ClaudeMonitor.Services;
 /// to the HookServer (server down, timeout, connection refused). Per
 /// TASKS.md §5, hooks must never block Claude Code: when the POST fails, the
 /// serialized payload is appended to <c>~/.claude/cc-pulse-queue.ndjson</c>
-/// (one JSON object per line), and CC-Pulse replays the queue on next launch
-/// via <see cref="Replay"/>.
+/// (one JSON object per line).
 ///
 /// This is the main-app counterpart to the dependency-free writer in the
-/// HookProxy project. Both write to the same file path; this class adds the
-/// replay (read + re-POST + truncate) logic that the hook process cannot do.
+/// HookProxy project. Both write to the same file path.
+///
+/// <para>
+/// <b>Replay is intentionally NOT performed on launch.</b> The queue holds
+/// events from while CC-Pulse was offline — by the time CC-Pulse restarts,
+/// those sessions may have ended, and re-delivering stale PreToolUse /
+/// PostToolUse events resurrects ghost sessions stuck in Busy (a trailing
+/// PreToolUse with no matching PostToolUse leaves <c>activeOps</c> true, so
+/// the watchdog's 30-min long-timeout tier keeps the phantom Busy for half
+/// an hour). CC-Pulse instead starts from the <i>current</i> real state:
+/// <see cref="Discard"/> drops the stale queue, and live SessionStart hooks
+/// build fresh sessions going forward. The queue file is retained as a
+/// diagnostic artifact of what Claude Code did while CC-Pulse was down.
+/// </para>
 /// </summary>
 public static class QueueManager
 {
     private static readonly string QueuePath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
         ".claude", "cc-pulse-queue.ndjson");
-
-    private static readonly HttpClient _httpClient = new()
-    {
-        Timeout = TimeSpan.FromSeconds(1),
-    };
-
-    private const string HookServerUrl = "http://localhost:8765";
 
     /// <summary>Append a serialized hook payload (one JSON object) to the queue file.</summary>
     public static void Enqueue(string jsonPayload)
@@ -48,84 +51,24 @@ public static class QueueManager
     }
 
     /// <summary>
-    /// Replay queued hook events to the HookServer. Reads each NDJSON line,
-    /// POSTs it to the endpoint encoded in the payload's "endpoint" field
-    /// (falling back to "idle"), and truncates the queue file on success.
-    /// Lines that fail to send are retained for the next replay. Called once
-    /// at app startup before the HookServer begins serving new events.
+    /// Drop the stale hook queue. Called once at app startup. The queue holds
+    /// events queued while CC-Pulse was offline; re-delivering them would
+    /// resurrect ended sessions (a trailing PreToolUse with no PostToolUse
+    /// leaves a ghost Busy). CC-Pulse starts from the current real state
+    /// instead — live SessionStart hooks build fresh sessions. The file is
+    /// deleted (not replayed); its contents are already on disk as a
+    /// diagnostic record of offline activity.
     /// </summary>
-    public static void Replay()
+    public static void Discard()
     {
-        if (!File.Exists(QueuePath)) return;
-
-        List<string> lines;
         try
         {
-            lines = new List<string>(File.ReadAllLines(QueuePath));
+            if (File.Exists(QueuePath)) File.Delete(QueuePath);
         }
         catch
         {
-            return;
+            // Best-effort — a stale queue file is harmless (it will not be
+            // replayed, and the next Enqueue simply appends to it).
         }
-
-        if (lines.Count == 0) return;
-
-        var failed = new List<string>();
-        foreach (var line in lines)
-        {
-            if (string.IsNullOrWhiteSpace(line)) continue;
-            if (!TryExtractEndpoint(line, out var endpoint))
-                endpoint = "idle";
-
-            try
-            {
-                var content = new StringContent(line, Encoding.UTF8, "application/json");
-                _ = _httpClient.PostAsync($"{HookServerUrl}/{endpoint}", content).Result;
-            }
-            catch
-            {
-                // Server still down — keep this line for the next replay.
-                failed.Add(line);
-            }
-        }
-
-        // Rewrite the queue with only the lines that still failed. If all
-        // succeeded, truncate to empty (then delete the empty file).
-        try
-        {
-            if (failed.Count == 0)
-            {
-                if (File.Exists(QueuePath)) File.Delete(QueuePath);
-            }
-            else
-            {
-                File.WriteAllText(QueuePath, string.Join("\n", failed) + "\n", Encoding.UTF8);
-            }
-        }
-        catch
-        {
-            // Best-effort — a stale queue file is harmless.
-        }
-    }
-
-    /// <summary>
-    /// Extract the "endpoint" field from a queued JSON payload without a full
-    /// DOM parse (the payload is flat key/value strings). Returns false if not
-    /// found.
-    /// </summary>
-    private static bool TryExtractEndpoint(string json, out string endpoint)
-    {
-        endpoint = "";
-        try
-        {
-            using var doc = System.Text.Json.JsonDocument.Parse(json);
-            if (doc.RootElement.TryGetProperty("endpoint", out var ep))
-            {
-                endpoint = ep.GetString() ?? "";
-                return endpoint.Length > 0;
-            }
-        }
-        catch { /* ignore */ }
-        return false;
     }
 }
