@@ -1327,6 +1327,10 @@ public class SessionManager : IDisposable
             {
                 _subagentToSession.TryRemove(agentId, out _);
                 _subagentWatcher?.DeactivateSubagent(agentId);
+                // Clear the terminal-state memory for this session's subagents
+                // so a verdict from the previous session does not leak into a
+                // future session that reuses the same agent id.
+                _subagentWatcher?.Tailer.ClearAllTerminal(new[] { agentId });
                 if (_subagentRemovalTimers.TryRemove(agentId, out var removalTimer))
                     removalTimer.Dispose();
             }

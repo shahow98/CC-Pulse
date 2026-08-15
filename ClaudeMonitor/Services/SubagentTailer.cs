@@ -65,14 +65,40 @@ public class SubagentTailer : IDisposable
     /// When the subagent has had activity (an assistant entry), has no unpaired
     /// tool_use, and no new line has arrived for this long, we infer the
     /// subagent has finished and derive <see cref="SubagentState.Completed"/>.
-    /// 20s aligns with the watcher's <c>FallbackStaleSeconds</c> so the tailer
-    /// and the watcher agree on the end-of-life boundary; a subagent's
-    /// think/act gap is normally &lt; 10s, so 20s of true silence is a safe
-    /// "done" signal.
+    ///
+    /// <para>40s covers the long think/act gaps observed in practice (a 32s
+    /// gap was seen to trip the previous 20s threshold and produce a false
+    /// terminal). A false terminal is no longer fatal — the terminal-memory +
+    /// file-grew escape hatch in <see cref="SubagentWatcher"/> prevents the
+    /// "disappear → re-spawn" flicker — but raising the threshold reduces how
+    /// often a still-running subagent's row briefly disappears before the
+    /// escape hatch re-adds it. The watcher's <c>FallbackStaleSeconds</c>
+    /// stays at 20s for the launch-mid-subagent fallback; the two thresholds
+    /// no longer need to match because the terminal memory, not the stale
+    /// window, is now what prevents re-activation.</para>
     /// </summary>
-    private const int IdleToCompletedSeconds = 20;
+    private const int IdleToCompletedSeconds = 40;
 
     private readonly ConcurrentDictionary<string, SubagentFileTail> _tails = new();
+
+    /// <summary>
+    /// Terminal-state memory: agent ids the tailer has already derived into
+    /// <see cref="SubagentState.Completed"/> or <see cref="SubagentState.Failed"/>,
+    /// mapped to the UTC moment that derivation happened. Independent of the
+    /// tail lifecycle — <see cref="DeactivateSubagent"/> does NOT clear an
+    /// entry, so the watcher can skip re-activating a subagent whose row was
+    /// removed on a (possibly false) terminal verdict.
+    ///
+    /// <para><b>Escape hatch:</b> a false terminal (a long think/act gap that
+    /// crossed <see cref="IdleToCompletedSeconds"/> while the subagent was
+    /// still running) is recovered by the watcher: if the subagent's jsonl
+    /// grows past <c>termAt</c> (a new line is written after the terminal
+    /// verdict), the watcher calls <see cref="ClearTerminal"/> and re-activates
+    /// the tail. Cleared wholesale by <see cref="ClearAllTerminal"/> on session
+    /// removal to avoid cross-session leakage.</para>
+    /// </summary>
+    private readonly ConcurrentDictionary<string, DateTime> _terminalAt = new();
+
     private System.Threading.Timer? _pollTimer;
     private bool _disposed;
 
@@ -126,6 +152,51 @@ public class SubagentTailer : IDisposable
         {
             tail.Dispose();
         }
+        // NOTE: _terminalAt is intentionally NOT cleared here. The terminal
+        // memory outlives the tail so the watcher keeps skipping a subagent
+        // whose row was removed on a terminal verdict — until the escape hatch
+        // (file grew) or session removal clears it.
+    }
+
+    /// <summary>
+    /// Whether the tailer has derived a terminal state (Completed/Failed) for
+    /// this agent. Used by the watcher to skip re-activating a subagent whose
+    /// row was already removed on a terminal verdict, preventing the
+    /// "disappear → re-spawn (Pending)" flicker.
+    /// </summary>
+    public bool IsTerminal(string agentId)
+        => _terminalAt.ContainsKey(agentId);
+
+    /// <summary>
+    /// Try to get the UTC moment the terminal verdict was recorded for this
+    /// agent. Returns false if the agent is not in the terminal memory. Used
+    /// by the watcher's escape hatch: if the subagent's jsonl last-line
+    /// timestamp is later than this moment, the file grew after the verdict →
+    /// false terminal → clear and re-activate.
+    /// </summary>
+    public bool TryGetTerminalAt(string agentId, out DateTime terminalAt)
+        => _terminalAt.TryGetValue(agentId, out terminalAt);
+
+    /// <summary>
+    /// Clear the terminal memory for one agent (the escape hatch). Called by
+    /// the watcher when it detects the subagent's jsonl grew past the terminal
+    /// verdict — the subagent was still running, so the verdict was false and
+    /// the agent is allowed to be re-activated.
+    /// </summary>
+    public void ClearTerminal(string agentId)
+        => _terminalAt.TryRemove(agentId, out _);
+
+    /// <summary>
+    /// Clear the terminal memory for a set of agents (session removal). Called
+    /// by SessionManager.RemoveSession so terminal verdicts from a previous
+    /// session do not leak into a future session that reuses the same agent
+    /// ids (agent ids are unique per session in practice, but clearing on
+    /// removal is cheap insurance).
+    /// </summary>
+    public void ClearAllTerminal(IEnumerable<string> agentIds)
+    {
+        foreach (var id in agentIds)
+            _terminalAt.TryRemove(id, out _);
     }
 
     /// <summary>
@@ -168,6 +239,14 @@ public class SubagentTailer : IDisposable
 
         tail.LastReportedState = derived;
         tail.LastReportedToolName = activeToolName;
+
+        // Record the terminal verdict so the watcher can skip re-activating
+        // this subagent after its row is removed. The escape hatch (file grew
+        // past this moment) clears it if the verdict turns out to be false.
+        if (derived == SubagentState.Completed || derived == SubagentState.Failed)
+        {
+            _terminalAt[tail.AgentId] = DateTime.UtcNow;
+        }
 
         FileLogger.Info(
             $"subagent state {tail.AgentId}: {derived} tool={activeToolName ?? "null"} " +

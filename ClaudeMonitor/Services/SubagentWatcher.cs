@@ -171,6 +171,41 @@ public class SubagentWatcher : IDisposable
                 continue;
             }
 
+            // Skip a subagent the tailer has already judged terminal. Without
+            // this, a false terminal (a long think/act gap crossing
+            // IdleToCompletedSeconds while the subagent was still running)
+            // flickers: the tailer derives Completed → the row is removed and
+            // the tail deactivated → this poll sees a still-recent last-line
+            // timestamp and re-activates the tail + re-adds the row as Pending
+            // → "disappear → re-spawning" flicker.
+            //
+            // Escape hatch: if the jsonl grew PAST the terminal verdict (a new
+            // line was written after termAt), the subagent was still running —
+            // the verdict was false. Clear the memory and let the normal
+            // activation path run so the row re-appears and the tail re-derives
+            // state from the new line (not stuck on Pending).
+            if (_tailer.IsTerminal(agentId))
+            {
+                if (lastActivity is not null &&
+                    _tailer.TryGetTerminalAt(agentId, out var termAt) &&
+                    lastActivity.Value > termAt)
+                {
+                    // File grew after the terminal verdict → false terminal.
+                    _tailer.ClearTerminal(agentId);
+                    FileLogger.Info(
+                        $"subagent terminal override (file grew) agent={agentId} " +
+                        $"termAt={termAt:o} lastActivity={lastActivity.Value:o}");
+                }
+                else
+                {
+                    // True terminal, or file has not grown past the verdict →
+                    // keep the row gone. Deactivate any lingering tail (the
+                    // row-removal path may have already done so) and skip.
+                    _tailer.DeactivateSubagent(agentId);
+                    continue;
+                }
+            }
+
             var meta = ReadMeta(subagentsDir, agentId);
 
             // Activate the tailer for this active subagent file. The tailer is
