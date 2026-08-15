@@ -190,6 +190,10 @@ public class SessionManager : IDisposable
         {
             session.ClearTranscriptTurnEnd();
             session.ResetGraceExpiredFlag();
+            // A new Busy activity means the user approved/answered (or the
+            // agent resumed on its own) — clear the waiting-for-user flag so
+            // the fine-grained state leaves WaitingUser.
+            session.ClearWaitingUser();
             if (oldStatus != SessionStatus.Busy)
                 session.ResetHookBusyConfirmed();
             session.HookBusyAtUtc = DateTime.UtcNow;
@@ -244,6 +248,26 @@ public class SessionManager : IDisposable
         // Trigger an immediate reconcile so the transcript can correct drift
         // as soon as it has caught up (rather than waiting for the poll).
         Reconcile(sessionId);
+    }
+
+    /// <summary>
+    /// Mark the main agent as waiting for user action — a permission approval
+    /// or an explicit input request surfaced via a hook Notification. Sets the
+    /// session's <see cref="SessionInfo.IsWaitingUser"/> flag and applies Idle
+    /// (the agent is not actively working), then reconciles so the fine-grained
+    /// state derives <see cref="MainAgentState.WaitingUser"/>. The flag is
+    /// cleared by the next Busy activity (<see cref="UpdateStatus"/> with
+    /// <see cref="SessionStatus.Busy"/>), so the agent resumes Thinking/ToolRunning
+    /// once the user approves/answers.
+    /// </summary>
+    public void SetWaitingUser(string sessionId)
+    {
+        if (!_sessions.TryGetValue(sessionId, out var session)) return;
+        session.SetWaitingUser();
+        // WaitingUser reduces to Idle for the coarse status (watchdog/tray).
+        // Apply Idle directly so the indicator turns green immediately; the
+        // reconciler will then derive MainState = WaitingUser for the text.
+        UpdateStatus(sessionId, SessionStatus.Idle);
     }
 
     /// <summary>
@@ -311,6 +335,12 @@ public class SessionManager : IDisposable
             session.HookState = SessionStatus.Idle;
             session.HookBusyAtUtc = null;
             session.ResetGraceExpiredFlag();
+            // Main fine-grained state is Idle while the subagent works (the
+            // subagent row carries the active state). Reset so a stale
+            // ToolRunning/Thinking from before the subagent started does not
+            // linger in the main row's text.
+            session.MainState = MainAgentState.Idle;
+            session.MainActiveToolName = string.Empty;
             StopBusyTimer(sessionId);
             StartOrResetSubagentTimer(sessionId);
 
@@ -812,6 +842,15 @@ public class SessionManager : IDisposable
     private const int GracePeriodSeconds = 2;
 
     /// <summary>
+    /// If the most recent real user message (a user prompt, not a tool_result)
+    /// has no assistant response for longer than this, the main agent is
+    /// considered to be waiting for the API (rate limit, network). Matches the
+    /// subagent tailer's <c>WaitingApiThresholdSeconds</c> so main and subagent
+    /// agree on the boundary.
+    /// </summary>
+    private const int WaitingApiThresholdSeconds = 10;
+
+    /// <summary>
     /// Reconciler poll interval. The reconciler runs on transcript events
     /// (immediate) AND on this timer, so that grace-period expiry and
     /// unconfirmed states are resolved even without new transcript lines.
@@ -856,12 +895,16 @@ public class SessionManager : IDisposable
     /// reconciles. If no PreToolUse hook announced this tool, logs a
     /// <c>hook_missed</c> anomaly (§4.3).
     /// </summary>
-    public void OnTranscriptToolUse(string sessionId, string toolUseId)
+    public void OnTranscriptToolUse(string sessionId, string toolUseId, string toolName = "")
     {
         if (!_sessions.TryGetValue(sessionId, out var session)) return;
         session.RecordTranscriptToolUse(toolUseId);
+        // Record the tool name so DeriveMainFineState can show "running: Bash"
+        // while this tool_use is unpaired. Stored on the session as the most
+        // recent tool name; cleared implicitly when the tool_result pairs.
+        session.MainActiveToolName = toolName;
         var hookTracked = session.IsToolHookTracked(toolUseId);
-        FileLogger.Info($"transcript tool_use {sessionId}: id={toolUseId} hookTracked={hookTracked}");
+        FileLogger.Info($"transcript tool_use {sessionId}: id={toolUseId} tool={toolName} hookTracked={hookTracked}");
 
         // The transcript observing a tool_use confirms the current hook-driven
         // Busy period. This suppresses grace_expired for the rest of the turn:
@@ -892,7 +935,44 @@ public class SessionManager : IDisposable
     {
         if (!_sessions.TryGetValue(sessionId, out var session)) return;
         session.RecordTranscriptToolResult(toolUseId);
+        // All tools paired → clear the active tool name so the fine-grained
+        // state leaves ToolRunning (DeriveMainFineState checks unpaired first,
+        // but clearing the name keeps MainActiveToolName from lingering).
+        if (!session.TranscriptHasUnpairedToolUse)
+        {
+            session.MainActiveToolName = string.Empty;
+        }
         FileLogger.Info($"transcript tool_result {sessionId}: id={toolUseId} unpaired={session.TranscriptHasUnpairedToolUse}");
+        Reconcile(sessionId);
+    }
+
+    /// <summary>
+    /// The transcript observed a real user message (a user entry that is NOT a
+    /// tool_result) at <paramref name="atUtc"/>. Records the timestamp on the
+    /// session so <see cref="DeriveMainFineState"/> can detect
+    /// <see cref="MainAgentState.WaitingApi"/> (user prompt with no assistant
+    /// response for &gt; <see cref="WaitingApiThresholdSeconds"/>). Reconciles
+    /// so the fine-grained state updates promptly.
+    /// </summary>
+    public void OnTranscriptUserMessage(string sessionId, DateTime atUtc)
+    {
+        if (!_sessions.TryGetValue(sessionId, out var session)) return;
+        session.RecordTranscriptUserMessage(atUtc);
+        Reconcile(sessionId);
+    }
+
+    /// <summary>
+    /// The transcript observed an assistant entry at <paramref name="atUtc"/>.
+    /// Records the timestamp on the session so <see cref="DeriveMainFineState"/>
+    /// can distinguish <see cref="MainAgentState.Thinking"/> (has assistant
+    /// activity) from <see cref="MainAgentState.Idle"/> (no activity), and so
+    /// a later user prompt can be detected as WaitingApi (assistant response
+    /// absent). Reconciles so the fine-grained state updates promptly.
+    /// </summary>
+    public void OnTranscriptAssistantMessage(string sessionId, DateTime atUtc)
+    {
+        if (!_sessions.TryGetValue(sessionId, out var session)) return;
+        session.RecordTranscriptAssistantMessage(atUtc);
         Reconcile(sessionId);
     }
 
@@ -971,6 +1051,25 @@ public class SessionManager : IDisposable
         {
             // Status unchanged but source changed — update for reporting.
             session.StateSource = source;
+        }
+
+        // Derive the fine-grained main-agent state (Idle/Thinking/ToolRunning/
+        // WaitingApi/WaitingUser) within the constraint of the coarse status
+        // just derived, and apply it so the UI text updates. This is done
+        // every reconcile tick (not just on status change) because time-based
+        // states (WaitingApi) and tool-name changes can advance without the
+        // coarse Idle/Busy flipping.
+        var fineState = DeriveMainFineState(session, now, derived);
+        if (session.MainState != fineState.State || session.MainActiveToolName != fineState.ToolName)
+        {
+            session.MainState = fineState.State;
+            session.MainActiveToolName = fineState.ToolName;
+            FileLogger.Info(
+                $"main-fine {sessionId}: {fineState.State} tool={fineState.ToolName} " +
+                $"coarse={derived} unpaired={session.TranscriptHasUnpairedToolUse} " +
+                $"lastUser={session.LastUserMessageUtc?.ToString("o") ?? "null"} " +
+                $"lastAsst={session.LastAssistantMessageUtc?.ToString("o") ?? "null"} " +
+                $"waitingUser={session.IsWaitingUser}");
         }
     }
 
@@ -1057,6 +1156,63 @@ public class SessionManager : IDisposable
         // 6. Fallback: keep last known status.
         source = session.StateSource;
         return session.Status;
+    }
+
+    /// <summary>
+    /// Derive the main agent's fine-grained state (Idle/Thinking/ToolRunning/
+    /// WaitingApi/WaitingUser) from the transcript signals and hook state,
+    /// constrained by the coarse <paramref name="coarse"/> status already
+    /// derived by <see cref="DeriveMainState"/>. The fine state must be
+    /// consistent with the coarse status: a Busy coarse status can only be
+    /// Thinking/ToolRunning/WaitingApi; an Idle coarse status can only be
+    /// Idle/WaitingUser.
+    ///
+    /// <para>Priority within Busy: ToolRunning (unpaired tool_use) &gt;
+    /// WaitingApi (user prompt with no assistant response &gt; threshold) &gt;
+    /// Thinking (default). Within Idle: WaitingUser (hook Notification flag)
+    /// &gt; Idle.</para>
+    /// </summary>
+    private (MainAgentState State, string ToolName) DeriveMainFineState(
+        SessionInfo session, DateTime nowUtc, SessionStatus coarse)
+    {
+        // Idle coarse status: WaitingUser takes precedence over plain Idle.
+        if (coarse == SessionStatus.Idle)
+        {
+            return session.IsWaitingUser
+                ? (MainAgentState.WaitingUser, string.Empty)
+                : (MainAgentState.Idle, string.Empty);
+        }
+
+        // Busy coarse status: refine into ToolRunning / WaitingApi / Thinking.
+
+        // 1. Unpaired tool_use → ToolRunning. The active tool name was recorded
+        //    by OnTranscriptToolUse from the tool_use block's "name" field.
+        if (session.TranscriptHasUnpairedToolUse)
+        {
+            return (MainAgentState.ToolRunning, session.MainActiveToolName);
+        }
+
+        // 2. Real user message with no assistant response for > threshold →
+        //    WaitingApi. This fires when the most recent real user prompt has
+        //    no later assistant entry and the gap exceeds the threshold. The
+        //    hook path has marked Busy (UserPromptSubmit), so coarse is Busy,
+        //    but the model has not responded yet.
+        var lastUser = session.LastUserMessageUtc;
+        if (lastUser is not null)
+        {
+            var lastAsst = session.LastAssistantMessageUtc;
+            var noAssistantAfterUser = lastAsst is null || lastUser.Value > lastAsst.Value;
+            if (noAssistantAfterUser &&
+                (nowUtc - lastUser.Value).TotalSeconds > WaitingApiThresholdSeconds)
+            {
+                return (MainAgentState.WaitingApi, string.Empty);
+            }
+        }
+
+        // 3. Default Busy sub-state: Thinking. Covers the between-tools gap,
+        //    the wait-for-Stop after a confirmed tool, and the initial hook
+        //    Busy before the first tool_use lands on disk.
+        return (MainAgentState.Thinking, string.Empty);
     }
 
     /// <summary>

@@ -1,79 +1,142 @@
-# 修复 subagent 终态推导缺口 + 行常驻 UI
+# 修复 main-fine WaitingApi 缺陷 + subagent 假终态重现
 
-## 根因
+## 缺陷 1：WaitingApi 永不触发
 
-两个问题同源：
+### 根因
+`TranscriptTailer.ProcessUser`（第 481-508 行）在 `message.content` 不是数组时直接 return：
+```csharp
+if (!msg.TryGetProperty("content", out var content) ||
+    content.ValueKind != JsonValueKind.Array) return;  // ← 字符串 content 直接 return
+```
+但真正的用户输入消息 `message.content` 是**字符串**（如 `"你可以启动一个子代理吗"`），不是数组。字符串 content 不满足 `Array` 条件，整个方法提前 return，`OnTranscriptUserMessage` 从未被调用，`LastUserMessageUtc` 始终为 null，`WaitingApi` 状态永远无法派生。
 
-1. **终态推导缺口**：`SubagentTailer.DeriveState` 依赖 `system.stop_hook_summary` 推导 `Completed`/`Failed`，但实测 Claude Code **不在 subagent 转录里写任何 `system` 条目**（转录只有 assistant/user/attachment）。所以 `_turnEnded` 永不置 true，subagent 状态永久卡在 `Thinking`。
+日志佐证：所有 `main-fine` 行都是 `lastUser=null`。
 
-2. **行常驻 UI**：XAML subagent 行可见性绑定 `HasSubagentActivity`（锁存字段，置 true 后永不回 false）。设计意图是"行 persists 显示 idle 过渡"，但配合问题 1，终态推不出 → 行无法干净消失 → 集合被 watcher fallback 清空后，`SubagentStatusText` 返回"subagent 空闲" → 绿色空闲行常驻。
+### 修复
+`ProcessUser` 重构为：先提取 timestamp；若 content 是数组，走 tool_result 配对逻辑并记录是否含 tool_result；若 content 不是数组（字符串等），视为纯 user 消息（必然不含 tool_result）。**无论 content 是否数组**，只要不含 tool_result，就调用 `OnTranscriptUserMessage`。
 
-数据约束（已验证）：
-- subagent 转录无 `system`/`stop_hook_summary`，`parentUuid`/`sourceToolAssistantUUID` 均为 None → 无法从主会话 tool_result 精确关联 subagent 终态
-- 主会话用 `Agent` 工具派生（非 `Task`），tool_use id (`call_xxx`) 与 subagent agentId (`ad387fb...`) 无映射
-- 唯一可靠终态信号：**subagent 转录长时间无新条目 + 无 unpaired tool_use**
+`TranscriptTailer.cs` `ProcessUser`：
+```csharp
+private void ProcessUser(JsonElement root)
+{
+    // timestamp 在顶层 root，无论 content 结构如何都可提取
+    var atUtc = ExtractTimestamp(root);
 
-## 修复方案
+    if (!root.TryGetProperty("message", out var msg) ||
+        msg.ValueKind != JsonValueKind.Object)
+    {
+        // 无 message 字段仍可能是 user 消息，按纯 user 消息处理
+        _sessionManager.OnTranscriptUserMessage(_sessionId, atUtc);
+        return;
+    }
 
-### 改动 1：SubagentTailer — 时间-based 终态兜底
+    bool hadToolResult = false;
+    if (msg.TryGetProperty("content", out var content) &&
+        content.ValueKind == JsonValueKind.Array)
+    {
+        // 数组 content：配对 tool_result
+        foreach (var item in content.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object) continue;
+            if (!item.TryGetProperty("type", out var t) || t.GetString() != "tool_result") continue;
+            hadToolResult = true;
+            if (!item.TryGetProperty("tool_use_id", out var idProp)) continue;
+            var id = idProp.GetString();
+            if (string.IsNullOrEmpty(id)) continue;
+            _sessionManager.OnTranscriptToolResult(_sessionId, id);
+        }
+    }
+    // 字符串/其他 content：hadToolResult 保持 false → 视为纯 user 消息
 
-在 `DeriveState` 中，`Thinking` 分支前增加一条**静默超时推导**：若最后一次转录活动距今超过阈值、且无 unpaired tool_use、且非 WaitingApi 条件，则推导为 `Completed`。
+    // 纯 user 消息（无 tool_result）启动 WaitingApi 窗口
+    if (!hadToolResult)
+    {
+        _sessionManager.OnTranscriptUserMessage(_sessionId, atUtc);
+    }
+}
+```
+
+注意：`ExtractTimestamp` 提前到配对逻辑之前，避免重复调用。原代码在 `!hadToolResult` 分支内调用 `ExtractTimestamp(root)`，重构后统一在开头提取。
+
+## 缺陷 2：subagent 假终态后重现（"消失→重新启动中"闪烁）
+
+### 根因链
+1. subagent 有较长思考/执行间隙（实测 32s：`23:30:45 → 23:31:17`）
+2. tailer `IdleToCompletedSeconds = 20` 阈值不够，20s 无新条目误判 `Completed`（`23:31:05`）
+3. 3s 后 `RemoveSubagent` 移除行 + `DeactivateSubagent` 停 tailer（`23:31:08`）
+4. **subagent 实际还在运行**，转录文件继续写入（`23:31:17` 有新条目）
+5. watcher `PollSession`（2s 间隔）重新扫描，`ReadLastActivityUtc` 读到文件最后行 timestamp 距今仅 1s < 20s，重新激活 tailer + `UpdateSubagents` 添加新行（`23:31:18`）
+6. 新行 `State` 默认 `Pending`（启动中），tailer 重新激活时 offset=EOF 无历史，`DeriveState` 返回 `Pending`，直到新行到达才更新 → UI 显示"重新启动中"
+
+**本质**：tailer（静默超时判终态）与 watcher（文件活跃判存活）两个独立系统对"终态"判断不一致。tailer 说"结束"移除行，watcher 说"还活着"加回行。
+
+### 数据约束（已验证）
+- `SubagentStop` hook **未配置且不可靠**（代码多处注释强调），不能作终态信号
+- 主会话 Agent 工具的 tool_result 在 subagent **启动时**就配对（`23:30:15`，subagent `23:30:16` 才 Pending），**不是结束信号**
+- meta.json 无 end 时间戳，只有 `toolUseId`（关联主会话 Agent tool_use，但该 tool_result 非终态）
+- 唯一能区分"长间隙"与"真结束"的信号：**subagent 转录文件是否继续增长**。但长间隙时文件暂时不增长，无法在静默时刻区分
+
+### 修复方案：终态记忆 + 文件增长逃生阀
+
+核心思路：tailer 判定终态后，把 agentId 加入"已知终态"集合；watcher 扫描时跳过该 agentId（不重新激活、不重新加行）。**但保留逃生阀**：如果该 subagent 的转录文件在终态判定后**确实又增长了**（新行写入），说明是假终态，清除记忆允许重新激活。
+
+这避免了"黑名单永久挡住真还在运行的 subagent"的风险：假终态后 subagent 继续写文件 → 文件增长 → 逃生阀触发 → 重新激活并从新行派生状态（不再卡 Pending，因为新行会立即被 tailer 处理）。
+
+#### 改动 1：SubagentTailer — 终态记忆
 
 `SubagentTailer.cs`：
-- 新增常量 `IdleToCompletedSeconds = 20`（与 watcher `FallbackStaleSeconds` 对齐）
-- `SubagentFileTail` 已有 `_lastEntryUtc`（每条条目更新），用它判断静默时长
-- `DeriveState` 在 `Thinking` 分支前插入：
-  ```
-  if (_lastAssistantUtc is not null && _unpairedToolUseIds.Count == 0
-      && (nowUtc - _lastEntryUtc).TotalSeconds > IdleToCompletedSeconds)
-  {
-      return SubagentState.Completed;
-  }
-  ```
-  - 注意：`_lastEntryUtc` 在 `ProcessLine` 里对所有解析成功的条目更新，是"最后活动"的准确度量
-  - 阈值 20s：subagent 思考间隙通常 <10s，20s 无新条目基本可判定结束；与 watcher fallback 一致，避免 tailer 与 watcher 打架
-- `Failed` 无法从转录内容可靠推导（无 error 信号），保留 `_turnEndedWithError` 路径作为未来扩展，本次不补
+- 新增 `ConcurrentDictionary<string, DateTime> _terminalAt`（key=agentId, value=终态判定时刻）
+- `RaiseStateIfChanged` 中，当派生出 `Completed`/`Failed` 时，记录 `_terminalAt[agentId] = nowUtc`
+- `DeactivateSubagent` 不清除 `_terminalAt`（终态记忆独立于 tail 生命周期）
+- 新增 `IsTerminal(agentId)` → 是否在终态记忆中
+- 新增 `ClearTerminal(agentId)` → 清除记忆（逃生阀用）
+- 新增 `HasGrownSince(agentId, jsonlPath, sinceUtc)` → 读取文件最后行 timestamp，若 > sinceUtc 返回 true（文件在终态后增长）
+  - 复用 watcher 的 `ReadLastActivityUtc` 逻辑（提取最后行 timestamp）。为避免重复代码，可将该方法提取为 `SubagentTailer` 的静态方法，或 watcher 调用 tailer 的方法
+  - 简化：直接在 watcher 里用现有 `ReadLastActivityUtc` 判断
 
-### 改动 2：SessionManager — 终态后延迟移除行
+#### 改动 2：SubagentWatcher — 跳过终态 agent，带逃生阀
 
-`UpdateSubagentState` 在设置 `State = Completed/Failed` 后，启动一个 per-agent 一次性定时器（3s），到时调用 `RemoveSubagent(sessionId, agentId)` 移除行。
+`SubagentWatcher.cs` `PollSession`（第 157-192 行）的 `foreach` 循环内，在 `ReadLastActivityUtc` stale 检查之后、`ActivateSubagent` 之前，插入：
+```csharp
+// 跳过已被 tailer 判定终态的 subagent，避免假终态后重新激活闪烁。
+// 逃生阀：若文件在终态判定后确实增长（新行），说明是假终态，清除记忆并重新激活。
+if (_tailer.IsTerminal(agentId))
+{
+    if (lastActivity is not null && _tailer.TryGetTerminalAt(agentId, out var termAt)
+        && lastActivity.Value > termAt)
+    {
+        // 文件在终态后增长 → 假终态，清除记忆重新激活
+        _tailer.ClearTerminal(agentId);
+        FileLogger.Info($"subagent terminal override (file grew) agent={agentId} termAt={termAt:o} lastActivity={lastActivity:o}");
+    }
+    else
+    {
+        // 真终态或文件未增长 → 跳过，不重新激活/加行
+        _tailer.DeactivateSubagent(agentId);
+        continue;
+    }
+}
+```
+- `lastActivity` 已在上方提取（`ReadLastActivityUtc`），复用
+- 逃生阀用文件最后行 timestamp > 终态时刻判断"是否增长"，无需额外 IO
 
-`SessionManager.cs`：
-- 新增 `ConcurrentDictionary<string, System.Threading.Timer> _subagentRemovalTimers`（key = agentId）
-- `UpdateSubagentState` 中，当 `state` 是 `Completed` 或 `Failed` 时：
-  ```
-  ScheduleSubagentRemoval(sessionId, agentId, TimeSpan.FromSeconds(3));
-  ```
-- 新增 `ScheduleSubagentRemoval`：创建一次性 Timer，回调里 `RemoveSubagent(sessionId, agentId)` 并从字典移除/释放 timer。若已存在同 agentId 的 timer，先释放旧的（防重复）
-- `RemoveSubagent` 已有的清理逻辑（移除行、清 `_subagentToSession`、`DeactivateSubagent`、`SubagentActive=false`）复用，无需改
-- 在 `RemoveSubagent` 和 session 移除路径里，额外清理 `_subagentRemovalTimers` 中该 agentId 的 timer（避免移除后 timer 仍触发）
+#### 改动 3：SessionManager — RemoveSubagent 清理时机
 
-### 改动 3：SessionInfo — `HasSubagentActivity` 在集合清空时回 false
+`RemoveSubagent` 已调用 `DeactivateSubagent`（停 tailer），**不清除** `_terminalAt`（保留终态记忆，阻止 watcher 重新加行）。这是关键：终态记忆的生命周期长于 tail 生命周期。
 
-让锁存可在"所有 subagent 结束"时解除，使行随终态移除而消失。
+session 移除路径（`RemoveSession`）里清除该 session 所有 subagent 的终态记忆（避免跨 session 泄漏）。`SubagentTailer` 新增 `ClearAllTerminal()` 或按 agentId 清除。
 
-`SessionInfo.cs`：
-- `HasSubagentActivity` 的 setter 改为允许回 false（移除 `private set` 的隐式约束，setter 本就是 `SetField`，已支持）
-- 在 `Subagents` 集合变化的回调里（`NotifyCollectionChanged` 或现有 hook），当 `Subagents.Count == 0` 时设 `HasSubagentActivity = false`
-- 需确认 `Subagents` 集合变化的监听点。当前 `SessionInfo` 构造里对 `Subagents.CollectionChanged` 有订阅（见 diff 中 line 518 附近的 `HasSubagentActivity = true`）。在该回调里增加：`if (Subagents.Count == 0) HasSubagentActivity = false`
-- 保留"首次检测到 subagent 时置 true"的逻辑不变
+#### 改动 4：阈值调整（可选，建议）
 
-### 改动 4：日志
+`IdleToCompletedSeconds` 20s → **40s**。实测 32s 间隙触发假终态，40s 可覆盖大多数思考间隙。配合终态记忆+逃生阀，即使 40s 仍误判，闪烁也不再发生（行不会被 watcher 加回）。阈值提高让真终态的行多停留至 40s+3s 才消失，但终态记忆阻止 watcher 干扰，体验可接受。
 
-`SubagentTailer.RaiseStateIfChanged` 已有日志，终态推导会自动记录 `state=Completed`。`ScheduleSubagentRemoval` 触发移除时，`RemoveSubagent` 路径已有日志覆盖（通过 `SubagentChanged` 事件）。新增一条 `FileLogger.Info` 记录延迟移除调度，便于诊断。
-
-## 不改动
-
-- `Failed` 推导：无可靠数据源，保留现状（`_turnEndedWithError` 路径），未来若 CC 写入 error 信号再补
-- `_parentToolUseToAgent` / `RegisterParentToolUse`：已删除，不恢复（数据上不可行）
-- watcher fallback stale 窗口：保留，作为 tailer 未激活时的兜底
-- `WaitingApi` 阈值 10s：不变
+**注意**：阈值调整是次要优化，核心修复是终态记忆+逃生阀。若不想改阈值，保留 20s 也可——闪烁由终态记忆消除，只是假终态时行会先消失（3s 后）再由逃生阀在文件增长时重新出现。为减少这种"先消失再出现"，建议提高阈值到 40s。
 
 ## 验证
 
 1. `dotnet build` 0 警告 0 错误
-2. 启动 CC-Pulse，触发 subagent，观察日志：
-   - 状态序列应出现 `... Thinking → Completed`（而非卡在 Thinking）
-   - `Completed` 后约 3s 出现行移除（`SubagentChanged` 事件）
-3. UI：subagent 行经历 `思考中…(红) → 完成(绿，约3s) → 消失`，主 agent 恢复 Busy/Idle
-4. 确认无"空闲"行常驻
+2. 缺陷 1：触发 main agent，用户输入后等待 >10s 无响应 → 日志应出现 `main-fine ... WaitingApi ... lastUser=<timestamp>`（而非 `lastUser=null`）
+3. 缺陷 2：触发长时间 subagent（含 >20s/40s 思考间隙）：
+   - 若 tailer 误判 Completed → 行移除 → 但 watcher **不重新加行**（日志无 `subagent state ... Pending` 重现）
+   - 若文件在终态后增长 → 日志出现 `subagent terminal override (file grew)`，行重新出现并从新行派生正确状态（非卡 Pending）
+4. 正常 subagent（短间隙）→ Completed → 3s 后行消失，无重现

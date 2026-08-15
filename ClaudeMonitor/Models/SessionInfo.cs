@@ -35,6 +35,20 @@ public class SessionInfo : INotifyPropertyChanged
     private string _subagentDescription = string.Empty;
     private bool _isWorking;
 
+    // ──────────────────────────────────────────────────────────────────
+    //  Main-agent fine-grained state (the Idle/Busy refinement). Derived
+    //  by SessionManager.DeriveMainFineState from the transcript fields
+    //  above plus the user/assistant timestamps below. The UI binds
+    //  MainStatusText to show "thinking…"/"running: Bash"/etc.
+    // ──────────────────────────────────────────────────────────────────
+
+    private MainAgentState _mainState = MainAgentState.Idle;
+    private string _mainActiveToolName = string.Empty;
+    private DateTime? _lastUserMessageUtc;
+    private DateTime? _lastAssistantMessageUtc;
+    private bool _isWaitingUser;
+    private readonly object _mainFineStateLock = new();
+
     /// <summary>
     /// The set of currently active subagents for this session. Populated
     /// authoritatively by <see cref="Services.SubagentWatcher"/>; the hook path
@@ -283,6 +297,189 @@ public class SessionInfo : INotifyPropertyChanged
         set => SetField(ref _stateSource, value);
     }
 
+    // ──────────────────────────────────────────────────────────────────
+    //  Main-agent fine-grained state (Idle/Busy refinement)
+    // ──────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The main agent's fine-grained internal state — the refinement of
+    /// <see cref="Status"/> (Idle/Busy) into Idle/Thinking/ToolRunning/
+    /// WaitingApi/WaitingUser. Derived by
+    /// <see cref="Services.SessionManager.DeriveMainFineState"/> and applied
+    /// by the reconciler. The UI binds <see cref="MainStatusText"/> (which
+    /// switches on this) to show a specific label instead of a generic
+    /// "Working…". Reduces to <see cref="Status"/> for the watchdog/tray.
+    /// </summary>
+    public MainAgentState MainState
+    {
+        get => _mainState;
+        set
+        {
+            if (SetField(ref _mainState, value))
+            {
+                // MainStatusText derives from MainState (+ MainActiveToolName),
+                // and IsWorking reduces from the coarse Status (unchanged here),
+                // so only the text binding needs re-notification.
+                OnPropertyChanged(nameof(MainStatusText));
+            }
+        }
+    }
+
+    /// <summary>
+    /// Name of the tool currently executing on the main agent (when
+    /// <see cref="MainState"/> is <see cref="MainAgentState.ToolRunning"/>),
+    /// empty otherwise. Reported in the fine-grained status text
+    /// ("running: Bash").
+    /// </summary>
+    public string MainActiveToolName
+    {
+        get => _mainActiveToolName;
+        set
+        {
+            if (SetField(ref _mainActiveToolName, value))
+            {
+                // Only relevant to the text while ToolRunning.
+                if (_mainState == MainAgentState.ToolRunning)
+                    OnPropertyChanged(nameof(MainStatusText));
+            }
+        }
+    }
+
+    /// <summary>
+    /// UTC timestamp of the most recent REAL user message (a user entry that
+    /// is NOT a tool_result) observed in the transcript. Used by
+    /// <see cref="Services.SessionManager.DeriveMainFineState"/> to detect
+    /// <see cref="MainAgentState.WaitingApi"/> (user prompt with no assistant
+    /// response for &gt; 10s). Null until the first real user message, and
+    /// cleared when a tool_result-bearing user entry arrives (so a tool
+    /// completing does not trigger WaitingApi). Guarded by
+    /// <see cref="_mainFineStateLock"/>.
+    /// </summary>
+    public DateTime? LastUserMessageUtc
+    {
+        get { lock (_mainFineStateLock) { return _lastUserMessageUtc; } }
+    }
+
+    /// <summary>
+    /// UTC timestamp of the most recent assistant entry observed in the
+    /// transcript. Used by <see cref="Services.SessionManager.DeriveMainFineState"/>
+    /// to distinguish <see cref="MainAgentState.Thinking"/> (has assistant
+    /// activity) from <see cref="MainAgentState.Idle"/> (no activity).
+    /// Guarded by <see cref="_mainFineStateLock"/>.
+    /// </summary>
+    public DateTime? LastAssistantMessageUtc
+    {
+        get { lock (_mainFineStateLock) { return _lastAssistantMessageUtc; } }
+    }
+
+    /// <summary>
+    /// True when the main agent is blocked waiting for user action (a
+    /// permission approval or input request surfaced via a hook Notification).
+    /// Set by <see cref="Services.SessionManager.SetWaitingUser"/>; cleared by
+    /// the next Busy activity (<see cref="ClearWaitingUser"/>). While true,
+    /// <see cref="DeriveMainFineState"/> returns
+    /// <see cref="MainAgentState.WaitingUser"/> (which reduces to Idle).
+    /// </summary>
+    public bool IsWaitingUser
+    {
+        get { lock (_mainFineStateLock) { return _isWaitingUser; } }
+    }
+
+    /// <summary>
+    /// Localized fine-grained status text for the main-agent row, reflecting
+    /// <see cref="MainState"/> (and <see cref="MainActiveToolName"/> when
+    /// ToolRunning). Binds the main row's TextBlock so the user sees
+    /// "thinking…", "running: Bash", "waiting for API…", or "waiting for
+    /// input…" instead of a generic "Working…"/"Idle".
+    /// </summary>
+    public string MainStatusText => ComputeMainStatusText();
+
+    private string ComputeMainStatusText()
+    {
+        return MainState switch
+        {
+            MainAgentState.Thinking => ClaudeMonitor.Services.Lang.Get("MainStateThinking"),
+            MainAgentState.ToolRunning => string.IsNullOrEmpty(MainActiveToolName)
+                ? ClaudeMonitor.Services.Lang.Get("MainStateToolRunningGeneric")
+                : ClaudeMonitor.Services.Lang.Get("MainStateToolRunning", MainActiveToolName),
+            MainAgentState.WaitingApi => ClaudeMonitor.Services.Lang.Get("MainStateWaitingApi"),
+            MainAgentState.WaitingUser => ClaudeMonitor.Services.Lang.Get("MainStateWaitingUser"),
+            _ => ClaudeMonitor.Services.Lang.Get("MainStateIdle"),
+        };
+    }
+
+    /// <summary>
+    /// Record a real user message (a user entry that is NOT a tool_result)
+    /// observed in the transcript at <paramref name="atUtc"/>. Updates
+    /// <see cref="LastUserMessageUtc"/> for WaitingApi derivation. Guarded by
+    /// <see cref="_mainFineStateLock"/>.
+    /// </summary>
+    public void RecordTranscriptUserMessage(DateTime atUtc)
+    {
+        lock (_mainFineStateLock)
+        {
+            _lastUserMessageUtc = atUtc;
+        }
+    }
+
+    /// <summary>
+    /// Record an assistant entry observed in the transcript at
+    /// <paramref name="atUtc"/>. Updates <see cref="LastAssistantMessageUtc"/>
+    /// for Thinking/Idle derivation. Guarded by
+    /// <see cref="_mainFineStateLock"/>.
+    /// </summary>
+    public void RecordTranscriptAssistantMessage(DateTime atUtc)
+    {
+        lock (_mainFineStateLock)
+        {
+            _lastAssistantMessageUtc = atUtc;
+        }
+    }
+
+    /// <summary>
+    /// Mark that the main agent is waiting for user action (a permission
+    /// approval or input request from a hook Notification). Sets the
+    /// <see cref="IsWaitingUser"/> flag so the next reconcile derives
+    /// <see cref="MainAgentState.WaitingUser"/>. Guarded by
+    /// <see cref="_mainFineStateLock"/>.
+    /// </summary>
+    public void SetWaitingUser()
+    {
+        lock (_mainFineStateLock)
+        {
+            _isWaitingUser = true;
+        }
+    }
+
+    /// <summary>
+    /// Clear the waiting-for-user flag. Called when the next Busy activity
+    /// arrives (the user approved/answered and the agent resumed). Guarded by
+    /// <see cref="_mainFineStateLock"/>.
+    /// </summary>
+    public void ClearWaitingUser()
+    {
+        lock (_mainFineStateLock)
+        {
+            _isWaitingUser = false;
+        }
+    }
+
+    /// <summary>
+    /// Clear the main-agent fine-grained state tracking (on session reset /
+    /// turn end). Resets the user/assistant timestamps and the waiting-for-user
+    /// flag so a stale timestamp from a previous turn does not bleed into the
+    /// next. Guarded by <see cref="_mainFineStateLock"/>.
+    /// </summary>
+    public void ClearMainFineStateTracking()
+    {
+        lock (_mainFineStateLock)
+        {
+            _lastUserMessageUtc = null;
+            _lastAssistantMessageUtc = null;
+            _isWaitingUser = false;
+        }
+    }
+
     /// <summary>
     /// Record a tool_use observed in the transcript (assistant entry). Pairs
     /// with <see cref="RecordTranscriptToolResult"/> by tool_use_id. Idempotent.
@@ -327,6 +524,14 @@ public class SessionInfo : INotifyPropertyChanged
         {
             _transcriptLastStopUtc = atUtc;
         }
+        // A turn end means the agent finished — clear the last real user
+        // message timestamp so it cannot trigger WaitingApi after the turn
+        // is over (the next WaitingApi can only come from a NEW user prompt
+        // in the next turn).
+        lock (_mainFineStateLock)
+        {
+            _lastUserMessageUtc = null;
+        }
         if (hadUnpaired)
         {
             AddAnomaly(new AnomalyRecord(
@@ -363,6 +568,10 @@ public class SessionInfo : INotifyPropertyChanged
         }
         // Session reset also discards pending hook confirmations.
         ClearPendingHookConfirms();
+        // And the main-agent fine-grained state tracking (user/assistant
+        // timestamps, waiting-for-user flag) so a stale timestamp from the
+        // previous turn does not bleed into the next.
+        ClearMainFineStateTracking();
     }
 
     /// <summary>Add an anomaly record, bounding the list to <see cref="MaxAnomaliesKept"/>.</summary>
@@ -497,6 +706,12 @@ public class SessionInfo : INotifyPropertyChanged
         // A turn end also discards any hook confirmations still pending — the
         // turn is over, so a late/missing PreToolUse is no longer actionable.
         ClearPendingHookConfirms();
+        // And the last real user message timestamp — the turn is over, so a
+        // stale user prompt cannot trigger WaitingApi after Stop.
+        lock (_mainFineStateLock)
+        {
+            _lastUserMessageUtc = null;
+        }
     }
 
     public SessionInfo()

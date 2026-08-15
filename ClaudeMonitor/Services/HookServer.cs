@@ -264,7 +264,11 @@ public class HookServer : IDisposable
         if (IsUserActionRequired(message, title, notifType))
         {
             _sessionManager.SetSubagentActive(sessionId, false);
-            _sessionManager.UpdateStatus(sessionId, SessionStatus.Idle);
+            // The agent is blocked on a permission approval / input request —
+            // mark it WaitingUser (a fine-grained Idle) so the UI shows
+            // "waiting for input…" rather than a plain Idle. The flag is
+            // cleared when the next Busy activity arrives (user approved).
+            _sessionManager.SetWaitingUser(sessionId);
         }
         else
         {

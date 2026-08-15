@@ -436,10 +436,16 @@ public class TranscriptTailer : IDisposable
         /// <summary>
         /// An assistant entry may carry one or more tool_use blocks in
         /// message.content[]. Each tool_use id is reported as an in-flight
-        /// tool (authoritative Busy signal).
+        /// tool (authoritative Busy signal). The entry timestamp is also
+        /// reported so the reconciler can derive the Thinking state (assistant
+        /// activity observed) and detect WaitingApi (user prompt with no
+        /// assistant response).
         /// </summary>
         private void ProcessAssistant(JsonElement root)
         {
+            var atUtc = ExtractTimestamp(root);
+            _sessionManager.OnTranscriptAssistantMessage(_sessionId, atUtc);
+
             if (!root.TryGetProperty("message", out var msg) ||
                 msg.ValueKind != JsonValueKind.Object) return;
             if (!msg.TryGetProperty("content", out var content) ||
@@ -452,30 +458,93 @@ public class TranscriptTailer : IDisposable
                 if (!item.TryGetProperty("id", out var idProp)) continue;
                 var id = idProp.GetString();
                 if (string.IsNullOrEmpty(id)) continue;
-                _sessionManager.OnTranscriptToolUse(_sessionId, id);
+                // The tool_use block carries the tool name (e.g. "Bash", "Read")
+                // in its "name" field — reported alongside the id so the
+                // fine-grained state can show "running: Bash".
+                var toolName = item.TryGetProperty("name", out var nameProp)
+                    ? nameProp.GetString() ?? string.Empty
+                    : string.Empty;
+                _sessionManager.OnTranscriptToolUse(_sessionId, id, toolName);
             }
         }
 
         /// <summary>
         /// A user entry may carry tool_result blocks in message.content[],
         /// each pairing a tool_use_id. Reporting it clears the in-flight tool.
+        /// A user entry WITHOUT any tool_result is a real user message (a new
+        /// prompt); its timestamp is reported so the reconciler can detect
+        /// WaitingApi (user prompt with no assistant response for &gt; 10s).
+        /// A tool_result-bearing entry is NOT a real user message and does not
+        /// start a WaitingApi window (it is the tool finishing, not the user
+        /// speaking).
+        ///
+        /// <para>Note: a real user prompt's <c>message.content</c> is a
+        /// <b>string</b> (e.g. <c>"run the tests"</c>), not an array — only
+        /// tool_result-bearing user entries use the array form. The timestamp
+        /// is extracted up front (it lives on the top-level entry, not in
+        /// <c>message</c>) so the WaitingApi window starts regardless of the
+        /// content shape.</para>
         /// </summary>
         private void ProcessUser(JsonElement root)
         {
-            if (!root.TryGetProperty("message", out var msg) ||
-                msg.ValueKind != JsonValueKind.Object) return;
-            if (!msg.TryGetProperty("content", out var content) ||
-                content.ValueKind != JsonValueKind.Array) return;
+            // The timestamp lives on the top-level entry, available regardless
+            // of the message.content shape (string vs array).
+            var atUtc = ExtractTimestamp(root);
 
-            foreach (var item in content.EnumerateArray())
+            if (!root.TryGetProperty("message", out var msg) ||
+                msg.ValueKind != JsonValueKind.Object)
             {
-                if (item.ValueKind != JsonValueKind.Object) continue;
-                if (!item.TryGetProperty("type", out var t) || t.GetString() != "tool_result") continue;
-                if (!item.TryGetProperty("tool_use_id", out var idProp)) continue;
-                var id = idProp.GetString();
-                if (string.IsNullOrEmpty(id)) continue;
-                _sessionManager.OnTranscriptToolResult(_sessionId, id);
+                // No message object — treat as a real user message.
+                _sessionManager.OnTranscriptUserMessage(_sessionId, atUtc);
+                return;
             }
+
+            bool hadToolResult = false;
+            if (msg.TryGetProperty("content", out var content) &&
+                content.ValueKind == JsonValueKind.Array)
+            {
+                // Array content: pair any tool_result blocks.
+                foreach (var item in content.EnumerateArray())
+                {
+                    if (item.ValueKind != JsonValueKind.Object) continue;
+                    if (!item.TryGetProperty("type", out var t) || t.GetString() != "tool_result") continue;
+                    hadToolResult = true;
+                    if (!item.TryGetProperty("tool_use_id", out var idProp)) continue;
+                    var id = idProp.GetString();
+                    if (string.IsNullOrEmpty(id)) continue;
+                    _sessionManager.OnTranscriptToolResult(_sessionId, id);
+                }
+            }
+            // String/other content: hadToolResult stays false → real user message.
+
+            // A real user message (no tool_result) starts a WaitingApi window:
+            // if no assistant response follows within the threshold, the agent
+            // is waiting for the API. A tool_result entry is the tool
+            // finishing, not the user speaking — do not start the window.
+            if (!hadToolResult)
+            {
+                _sessionManager.OnTranscriptUserMessage(_sessionId, atUtc);
+            }
+        }
+
+        /// <summary>
+        /// Extract the UTC timestamp from a transcript entry's top-level
+        /// <c>timestamp</c> field. Falls back to <see cref="DateTime.UtcNow"/>
+        /// if absent or malformed (same policy as <see cref="ProcessSystem"/>).
+        /// </summary>
+        private static DateTime ExtractTimestamp(JsonElement root)
+        {
+            if (root.TryGetProperty("timestamp", out var tsProp) &&
+                tsProp.ValueKind == JsonValueKind.String &&
+                DateTime.TryParse(tsProp.GetString(),
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AssumeUniversal
+                    | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                    out var dt))
+            {
+                return dt.ToUniversalTime();
+            }
+            return DateTime.UtcNow;
         }
 
         /// <summary>
@@ -489,19 +558,7 @@ public class TranscriptTailer : IDisposable
             if (!root.TryGetProperty("subtype", out var subProp)) return;
             if (subProp.GetString() != "stop_hook_summary") return;
 
-            DateTime atUtc = DateTime.UtcNow;
-            if (root.TryGetProperty("timestamp", out var tsProp) &&
-                tsProp.ValueKind == JsonValueKind.String &&
-                DateTime.TryParse(tsProp.GetString(),
-                    System.Globalization.CultureInfo.InvariantCulture,
-                    System.Globalization.DateTimeStyles.AssumeUniversal
-                    | System.Globalization.DateTimeStyles.AdjustToUniversal,
-                    out var dt))
-            {
-                atUtc = dt.ToUniversalTime();
-            }
-
-            _sessionManager.OnTranscriptTurnEnd(_sessionId, atUtc);
+            _sessionManager.OnTranscriptTurnEnd(_sessionId, ExtractTimestamp(root));
         }
 
         public void Dispose()

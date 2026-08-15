@@ -18,7 +18,6 @@
         <!-- Status to color converter -->
         <ui:StatusToColorConverter x:Key="StatusToColorConverter" />
         <ui:StatusToTextConverter x:Key="StatusToTextConverter" />
-        <ui:MainStatusToTextConverter x:Key="MainStatusToTextConverter" />
         <ui:BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
 
         <!-- Drop shadow border style -->
@@ -59,7 +58,7 @@
                              Margin="0,0,4,0" />
 
                     <TextBlock Grid.Column="1"
-                               Text="{Binding Status, Converter={StaticResource MainStatusToTextConverter}}"
+                               Text="{Binding MainStatusText}"
                                Foreground="{Binding IsWorking, Converter={StaticResource StatusToColorConverter}}"
                                FontSize="11"
                                VerticalAlignment="Center" />

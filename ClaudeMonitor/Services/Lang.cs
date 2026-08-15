@@ -20,9 +20,17 @@ public static class Lang
         // Agent labels (main vs subagent)
         ["MainAgentLabel"] = "main",
         ["SubagentLabel"] = "subagent",
-        ["StatusMainIdle"] = "main  Idle",
-        ["StatusMainBusy"] = "main  Working…",
         ["StatusSubagentIdle"] = "subagent  Idle",
+
+        // Main-agent fine-grained states. Shown in the main status row when
+        // the main agent is in that state. The "main" prefix is omitted here
+        // because the row already sits under the session card.
+        ["MainStateIdle"] = "main  Idle",
+        ["MainStateThinking"] = "main  thinking…",
+        ["MainStateToolRunning"] = "main  running: {0}",
+        ["MainStateToolRunningGeneric"] = "main  running tool…",
+        ["MainStateWaitingApi"] = "main  waiting for API…",
+        ["MainStateWaitingUser"] = "main  waiting for input…",
 
         // Subagent fine-grained states (TASKS.md §5.1). Shown in the subagent
         // status row when a subagent is in that state. The "subagent" prefix
@@ -79,9 +87,15 @@ public static class Lang
         // Agent labels (main vs subagent)
         ["MainAgentLabel"] = "main",
         ["SubagentLabel"] = "subagent",
-        ["StatusMainIdle"] = "main  空闲",
-        ["StatusMainBusy"] = "main  工作中…",
         ["StatusSubagentIdle"] = "subagent  空闲",
+
+        // Main-agent fine-grained states.
+        ["MainStateIdle"] = "main  空闲",
+        ["MainStateThinking"] = "main  思考中…",
+        ["MainStateToolRunning"] = "main  运行: {0}",
+        ["MainStateToolRunningGeneric"] = "main  运行工具…",
+        ["MainStateWaitingApi"] = "main  等待 API…",
+        ["MainStateWaitingUser"] = "main  等待输入…",
 
         // Subagent fine-grained states (TASKS.md §5.1).
         ["SubagentStatePending"] = "subagent  启动中…",

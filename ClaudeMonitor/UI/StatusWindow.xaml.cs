@@ -262,31 +262,6 @@ public class StatusToTextConverter : IValueConverter
     }
 }
 
-/// <summary>
-/// Converts the main agent's SessionStatus to a labeled text string
-/// ("main · Idle" / "main · Working…"). Used for the main status row.
-/// </summary>
-public class MainStatusToTextConverter : IValueConverter
-{
-    public object Convert(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
-    {
-        if (value is SessionStatus status)
-        {
-            return status switch
-            {
-                SessionStatus.Busy => Lang.Get("StatusMainBusy"),
-                _ => Lang.Get("StatusMainIdle")
-            };
-        }
-        return Lang.Get("StatusMainIdle");
-    }
-
-    public object ConvertBack(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
-    {
-        throw new NotImplementedException();
-    }
-}
-
 /// <summary>Converts a bool to Visibility (true → Visible, false → Collapsed).</summary>
 public class BooleanToVisibilityConverter : IValueConverter
 {
