@@ -28,6 +28,7 @@ public partial class App : System.Windows.Application
     private TrayManager? _trayManager;
     private StatusWindow? _statusWindow;
     private SubagentWatcher? _subagentWatcher;
+    private TranscriptTailer? _transcriptTailer;
 
     private static readonly string ClaudeDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
@@ -70,6 +71,8 @@ public partial class App : System.Windows.Application
         // against a dead HookServer while CC-Pulse is closed.
         EnsureHooksConfigured();
 
+        FileLogger.Info("=== CC-Pulse starting ===");
+
         // Initialize core services
         _sessionManager = new SessionManager();
         _hookServer = new HookServer(_sessionManager);
@@ -79,10 +82,28 @@ public partial class App : System.Windows.Application
         // SubagentWatcher scans each session's subagents/ directory on disk to
         // detect subagent activity authoritatively (the hook path misses
         // subagents when the spawning tool is named "Task" and its SubagentStop
-        // event is unreliable). It reconciles with the hook signals every poll.
+        // event is unreliable). Phase 2 (TASKS.md §5.2): the watcher now drives
+        // a SubagentTailer that incrementally parses each agent-<id>.jsonl and
+        // derives a fine-grained SubagentState (Thinking/ToolRunning/WaitingApi/
+        // Completed/Failed) from the transcript content, instead of relying on
+        // a coarse 20s last-line-timestamp window. The watcher reconciles with
+        // the hook signals every poll.
         _subagentWatcher = new SubagentWatcher(_sessionManager);
         _sessionManager.SetSubagentWatcher(_subagentWatcher);
         _subagentWatcher.Start();
+
+        // TranscriptTailer (Phase 2 §2/§4): tails each session's main
+        // transcript JSONL and reports authoritatively-observed tool_use /
+        // tool_result / turn-end to the SessionManager. The transcript is the
+        // source of truth; hooks are low-latency triggers. The reconciler
+        // (started below) fuses the two, overriding hook-driven state when
+        // the transcript disagrees. Tailer reads only NEW lines (offset
+        // initialized to EOF), so launching mid-session does not replay
+        // history.
+        _transcriptTailer = new TranscriptTailer(_sessionManager);
+        _sessionManager.SetTranscriptTailer(_transcriptTailer);
+        _transcriptTailer.Start();
+        _sessionManager.StartReconciler();
 
         // Wire up tray events
         _trayManager.ExitRequested += OnExitRequested;
@@ -90,6 +111,18 @@ public partial class App : System.Windows.Application
 
         // Start the HTTP hook server
         _hookServer.Start();
+
+        // Drop any hook events queued while CC-Pulse was not running
+        // (TASKS.md §5): the hook proxy writes to ~/.claude/cc-pulse-queue.ndjson
+        // when the HookServer is unreachable. These events are HISTORICAL —
+        // by the time CC-Pulse restarts, the sessions that produced them may
+        // have ended. Re-delivering them would resurrect ghost sessions stuck
+        // in Busy (a trailing PreToolUse with no matching PostToolUse leaves
+        // activeOps true, so the 30-min watchdog tier keeps the phantom Busy).
+        // Discard the queue and start from the current real state: live
+        // SessionStart hooks build fresh sessions going forward.
+        try { QueueManager.Discard(); }
+        catch (Exception ex) { Debug.WriteLine($"Queue discard failed: {ex.Message}"); }
 
         // Show the status window
         _statusWindow.Show();
@@ -283,6 +316,7 @@ public partial class App : System.Windows.Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        FileLogger.Info("=== CC-Pulse exiting ===");
         // Remove CC-Pulse hooks from Claude Code settings so they don't linger
         // (and fire against a dead HookServer) while CC-Pulse is closed.
         // They are re-inserted on the next launch by EnsureHooksConfigured.
@@ -297,6 +331,7 @@ public partial class App : System.Windows.Application
 
         // Clean up resources in reverse order
         _hookServer?.Dispose();
+        _transcriptTailer?.Dispose();
         _subagentWatcher?.Dispose();
         _trayManager?.Dispose();
         _sessionManager?.Dispose();

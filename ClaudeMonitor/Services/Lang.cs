@@ -22,8 +22,18 @@ public static class Lang
         ["SubagentLabel"] = "subagent",
         ["StatusMainIdle"] = "main  Idle",
         ["StatusMainBusy"] = "main  Working…",
-        ["StatusSubagentBusy"] = "subagent  Working…",
         ["StatusSubagentIdle"] = "subagent  Idle",
+
+        // Subagent fine-grained states (TASKS.md §5.1). Shown in the subagent
+        // status row when a subagent is in that state. The "subagent" prefix
+        // is omitted here because the row already sits under the session card.
+        ["SubagentStatePending"] = "subagent  starting…",
+        ["SubagentStateThinking"] = "subagent  thinking…",
+        ["SubagentStateToolRunning"] = "subagent  running: {0}",
+        ["SubagentStateToolRunningGeneric"] = "subagent  running tool…",
+        ["SubagentStateWaitingApi"] = "subagent  waiting for API…",
+        ["SubagentStateCompleted"] = "subagent  done",
+        ["SubagentStateFailed"] = "subagent  failed",
 
         // Status window
         ["NoActiveSessions"] = "No active sessions",
@@ -71,8 +81,16 @@ public static class Lang
         ["SubagentLabel"] = "subagent",
         ["StatusMainIdle"] = "main  空闲",
         ["StatusMainBusy"] = "main  工作中…",
-        ["StatusSubagentBusy"] = "subagent  工作中…",
         ["StatusSubagentIdle"] = "subagent  空闲",
+
+        // Subagent fine-grained states (TASKS.md §5.1).
+        ["SubagentStatePending"] = "subagent  启动中…",
+        ["SubagentStateThinking"] = "subagent  思考中…",
+        ["SubagentStateToolRunning"] = "subagent  运行: {0}",
+        ["SubagentStateToolRunningGeneric"] = "subagent  运行工具…",
+        ["SubagentStateWaitingApi"] = "subagent  等待 API…",
+        ["SubagentStateCompleted"] = "subagent  完成",
+        ["SubagentStateFailed"] = "subagent  失败",
 
         // Status window
         ["NoActiveSessions"] = "无活动会话",

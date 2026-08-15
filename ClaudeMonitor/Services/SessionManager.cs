@@ -26,6 +26,17 @@ public class SessionManager : IDisposable
     private const int BusyTimeoutSeconds = 60;
 
     /// <summary>
+    /// Extended timeout applied while the session has in-flight tool calls
+    /// (ActiveTools non-empty). A long-running tool (Bash compile, large file
+    /// processing) emits no hooks between PreToolUse and PostToolUse, so the
+    /// short 60s timer would prematurely reset the session to Idle. Per
+    /// TASKS.md §3.2, tool execution should not be interrupted by the
+    /// watchdog. 30 minutes covers virtually all real tool runs; if it still
+    /// expires, the anomaly is logged before resetting.
+    /// </summary>
+    private const int LongBusyTimeoutSeconds = 1800;
+
+    /// <summary>
     /// Timeout after which a subagent-active flag is automatically cleared.
     /// SubagentStop is not reliably fired by Claude Code, so this watchdog
     /// ensures the subagent row eventually disappears. The timer is reset on
@@ -38,6 +49,28 @@ public class SessionManager : IDisposable
     private readonly ConcurrentDictionary<string, SessionInfo> _sessions = new();
     private readonly ConcurrentDictionary<string, System.Threading.Timer> _busyTimers = new();
     private readonly ConcurrentDictionary<string, System.Threading.Timer> _subagentTimers = new();
+
+    /// <summary>
+    /// Per-agent one-shot removal timers. When a subagent reaches a terminal
+    /// state (Completed/Failed), <see cref="UpdateSubagentState"/> schedules a
+    /// removal after a short delay so the UI can show the terminal transition
+    /// (e.g. "done" in green) before the row disappears. Keyed by agent id.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, System.Threading.Timer> _subagentRemovalTimers = new();
+
+    /// <summary>How long a terminal subagent row is shown before removal.</summary>
+    private const int SubagentTerminalDisplaySeconds = 3;
+
+    /// <summary>
+    /// Main↔Subagent association table (TASKS.md §5.3): maps a subagent's
+    /// agent id to the main session id that spawned it. Populated when a
+    /// subagent is discovered (via <see cref="SubagentWatcher"/> or the
+    /// spawning hook) and used to route subagent state updates back to the
+    /// owning session without scanning every session. Entries are removed
+    /// when the subagent's row is removed (SubagentStop hook, watcher stale
+    /// eviction, or session end).
+    /// </summary>
+    private readonly ConcurrentDictionary<string, string> _subagentToSession = new();
 
     /// <summary>
     /// Filesystem watcher that authoritatively detects subagent activity by
@@ -116,18 +149,77 @@ public class SessionManager : IDisposable
         // Register with the subagent watcher so this session's subagents/
         // directory is polled for subagent activity.
         _subagentWatcher?.RegisterSession(sessionId, projectPath);
+
+        // Activate transcript tailing so the main-agent state machine can be
+        // driven authoritatively by the JSONL (Phase 2 §4). The tailer reads
+        // only NEW lines (offset initialized to EOF), so launching mid-session
+        // does not replay history.
+        _transcriptTailer?.ActivateFile(sessionId, projectPath);
     }
 
-    /// <summary>Update a session's status.</summary>
+    /// <summary>
+    /// Update a session's status from the HOOK path. This is the low-latency
+    /// trigger (§4): it sets <see cref="SessionInfo.HookState"/> and the
+    /// grace-period timestamp, applies the status immediately for instant UI
+    /// feedback, and triggers a reconcile so the transcript can correct it
+    /// once it lands on disk. The transcript is the authority; if it later
+    /// disagrees, the reconciler overrides <see cref="SessionInfo.Status"/>.
+    /// </summary>
     public void UpdateStatus(string sessionId, SessionStatus newStatus)
     {
         if (!_sessions.TryGetValue(sessionId, out var session)) return;
 
         var oldStatus = session.Status;
-        if (oldStatus == newStatus) return;
 
+        // A hook-driven Busy (re)starts the grace window EVERY time it arrives,
+        // even if Status is already Busy. Within one turn, multiple PreToolUse
+        // hooks fire (one per tool); each must refresh the grace-period start
+        // so a long multi-tool turn is not mis-flagged as grace_expired after
+        // the first 2s. It also clears a stale TranscriptLastStopUtc from the
+        // PREVIOUS turn so rule 2 does not suppress this turn hook-driven
+        // Busy while the new tool_use has not yet landed on disk (§4.4).
+        //
+        // The confirmation flag (HookBusyConfirmedByTranscript) is reset ONLY
+        // on a genuine new Busy period (Idle->Busy). A Busy->Busy refresh
+        // (the next PreToolUse in the same turn) must PRESERVE it: the
+        // transcript often confirms the turn's first tool_use before the
+        // first PreToolUse hook even arrives (hook lags transcript), and each
+        // subsequent PreToolUse would otherwise wipe that confirmation and
+        // re-enable grace_expired mid-turn.
+        if (newStatus == SessionStatus.Busy)
+        {
+            session.ClearTranscriptTurnEnd();
+            session.ResetGraceExpiredFlag();
+            if (oldStatus != SessionStatus.Busy)
+                session.ResetHookBusyConfirmed();
+            session.HookBusyAtUtc = DateTime.UtcNow;
+        }
+        else
+        {
+            session.HookBusyAtUtc = null;
+        }
+
+        // Skip the rest if nothing actually changed (same status AND same hook
+        // state). The grace refresh above still ran, which is intended.
+        if (oldStatus == newStatus && session.HookState == newStatus)
+        {
+            // Status unchanged, but we refreshed grace. Reconcile so the
+            // updated HookBusyAtUtc takes effect immediately.
+            Reconcile(sessionId);
+            return;
+        }
+
+        // Record the hook's view (§4.3).
+        session.HookState = newStatus;
+
+        // Apply immediately for low-latency UI feedback. The reconciler may
+        // override this within the grace window if the transcript disagrees.
         session.Status = newStatus;
         session.LastUpdated = DateTime.Now;
+
+        FileLogger.Info(
+            $"hook {sessionId}: {oldStatus}->{newStatus} " +
+            $"activeOps={session.HasActiveOperations} subagent={session.SubagentActive}");
 
         // Manage the watchdog timer based on the new status
         if (newStatus == SessionStatus.Busy)
@@ -148,6 +240,10 @@ public class SessionManager : IDisposable
         });
 
         SessionsChanged?.Invoke(this, EventArgs.Empty);
+
+        // Trigger an immediate reconcile so the transcript can correct drift
+        // as soon as it has caught up (rather than waiting for the poll).
+        Reconcile(sessionId);
     }
 
     /// <summary>
@@ -204,9 +300,17 @@ public class SessionManager : IDisposable
 
         if (active)
         {
-            // Main agent is now waiting for the subagent → show Idle
+            // Main agent is now waiting for the subagent → show Idle. Sync the
+            // hook-derived state too: a stale HookState=Busy / HookBusyAtUtc
+            // from before the subagent started would otherwise resurface via
+            // DeriveMainState rule 4 once the subagent ends and Reconcile runs
+            // again, wrongly flipping main back to Busy. The subagent row is
+            // the active signal now; main is authoritatively Idle.
             var oldStatus = session.Status;
             session.Status = SessionStatus.Idle;
+            session.HookState = SessionStatus.Idle;
+            session.HookBusyAtUtc = null;
+            session.ResetGraceExpiredFlag();
             StopBusyTimer(sessionId);
             StartOrResetSubagentTimer(sessionId);
 
@@ -268,7 +372,13 @@ public class SessionManager : IDisposable
             for (int i = current.Count - 1; i >= 0; i--)
             {
                 if (!activeById.ContainsKey(current[i].AgentId))
+                {
+                    var removedAgentId = current[i].AgentId;
                     current.RemoveAt(i);
+                    // Clean up association table and stop tailing this subagent.
+                    _subagentToSession.TryRemove(removedAgentId, out _);
+                    _subagentWatcher?.DeactivateSubagent(removedAgentId);
+                }
             }
 
             // Update surviving rows and append new ones, preserving the active
@@ -286,6 +396,7 @@ public class SessionManager : IDisposable
                     if (dst.AgentType != src.AgentType) dst.AgentType = src.AgentType;
                     if (dst.Description != src.Description) dst.Description = src.Description;
                     if (dst.DisplayName != src.DisplayName) dst.DisplayName = src.DisplayName;
+                    if (dst.LastActivityUtc != src.LastActivityUtc) dst.LastActivityUtc = src.LastActivityUtc;
                 }
                 else
                 {
@@ -295,9 +406,13 @@ public class SessionManager : IDisposable
                         AgentType = src.AgentType,
                         Description = src.Description,
                         DisplayName = src.DisplayName,
+                        LastActivityUtc = src.LastActivityUtc,
                     };
                     current.Add(info);
                     existingById[src.AgentId] = info;
+                    // Register the Main↔Subagent association so subsequent
+                    // SubagentTailer state updates route to this session.
+                    RegisterSubagentAssociation(src.AgentId, sessionId);
                 }
             }
         }
@@ -318,10 +433,15 @@ public class SessionManager : IDisposable
             // working, the main agent is waiting (Idle). Hooks can momentarily
             // set main to Busy on internal activity while a subagent runs;
             // the watcher overrides that here so the main indicator stays green.
+            // Sync HookState/HookBusyAtUtc too so a stale hook Busy does not
+            // resurface via DeriveMainState once the subagent ends.
             if (session.Status == SessionStatus.Busy)
             {
                 var oldStatus = session.Status;
                 session.Status = SessionStatus.Idle;
+                session.HookState = SessionStatus.Idle;
+                session.HookBusyAtUtc = null;
+                session.ResetGraceExpiredFlag();
                 StopBusyTimer(sessionId);
                 StatusChanged?.Invoke(this, new SessionStatusChangedEventArgs
                 {
@@ -366,6 +486,13 @@ public class SessionManager : IDisposable
     public void RemoveSubagent(string sessionId, string agentId)
     {
         if (string.IsNullOrEmpty(agentId)) return;
+
+        // Cancel any pending terminal-removal timer for this agent (the row
+        // is being removed now by another path — hook, watcher fallback, or
+        // session end — so the scheduled removal is obsolete).
+        if (_subagentRemovalTimers.TryRemove(agentId, out var pendingTimer))
+            pendingTimer.Dispose();
+
         if (!_sessions.TryGetValue(sessionId, out var session)) return;
 
         var current = session.Subagents;
@@ -382,6 +509,13 @@ public class SessionManager : IDisposable
                 }
             }
         }
+
+        // Clean up the association table and stop tailing this subagent
+        // regardless of whether the row was present (the row may have already
+        // been aged out by the watcher, but the tailer/association may still
+        // linger).
+        _subagentToSession.TryRemove(agentId, out _);
+        _subagentWatcher?.DeactivateSubagent(agentId);
 
         if (!removed)
         {
@@ -429,14 +563,620 @@ public class SessionManager : IDisposable
         return _sessions.TryGetValue(sessionId, out var session) && session.SubagentActive;
     }
 
+    /// <summary>
+    /// Update a subagent's fine-grained internal state (TASKS.md §5.2/§6).
+    /// Called by <see cref="SubagentTailer"/> via
+    /// <see cref="SubagentWatcher"/> whenever the subagent's transcript
+    /// yields a new derived state (Thinking/ToolRunning/WaitingApi/Completed/Failed).
+    /// Locates the <see cref="SubagentInfo"/> row by agent id across all
+    /// sessions (subagent ids are globally unique), updates its State /
+    /// ActiveToolName / StateSource, and raises a SubagentChanged event so
+    /// the UI refreshes the subagent row's text and color.
+    ///
+    /// <para>Side effects on terminal states:</para>
+    /// <list type="bullet">
+    /// <item><see cref="SubagentState.Completed"/> / <see cref="SubagentState.Failed"/>:
+    /// the subagent has finished. We do NOT remove the row here — the
+    /// SubagentStop hook (or the watcher's stale-window fallback) owns row
+    /// removal. We only update the state so the UI can show the brief
+    /// terminal transition. The main-agent Reconcile is re-run so main can
+    /// resume Busy/Idle now that the subagent is no longer working.</item>
+    /// </list>
+    /// </summary>
+    public void UpdateSubagentState(string agentId, SubagentState state,
+        string activeToolName, StateSource source)
+    {
+        if (string.IsNullOrEmpty(agentId)) return;
+
+        // Route via the association table (fast path).
+        SessionInfo? session = null;
+        string? sessionId = null;
+        if (_subagentToSession.TryGetValue(agentId, out var sid) &&
+            _sessions.TryGetValue(sid, out session))
+        {
+            sessionId = sid;
+        }
+        else
+        {
+            // Association not yet established — scan sessions. This happens
+            // when the tailer fires before the watcher's UpdateSubagents
+            // registered the agent id (a race during subagent spawn).
+            foreach (var kvp in _sessions)
+            {
+                SubagentInfo? row = null;
+                lock (kvp.Value.SubagentsLock)
+                {
+                    for (int i = 0; i < kvp.Value.Subagents.Count; i++)
+                    {
+                        if (string.Equals(kvp.Value.Subagents[i].AgentId, agentId,
+                            StringComparison.Ordinal))
+                        {
+                            row = kvp.Value.Subagents[i];
+                            break;
+                        }
+                    }
+                }
+                if (row is not null)
+                {
+                    session = kvp.Value;
+                    sessionId = kvp.Key;
+                    _subagentToSession[agentId] = sessionId;
+                    break;
+                }
+            }
+        }
+
+        if (session is null || sessionId is null) return;
+
+        SubagentInfo? target = null;
+        lock (session.SubagentsLock)
+        {
+            for (int i = 0; i < session.Subagents.Count; i++)
+            {
+                if (string.Equals(session.Subagents[i].AgentId, agentId,
+                    StringComparison.Ordinal))
+                {
+                    target = session.Subagents[i];
+                    break;
+                }
+            }
+        }
+
+        if (target is null) return;
+
+        // Update the fine-grained fields. SetField raises PropertyChanged for
+        // State, which cascades to IsWorking/Confidence in SubagentInfo.
+        target.State = state;
+        target.ActiveToolName = activeToolName;
+        target.StateSource = source;
+        target.LastActivityUtc = DateTime.UtcNow;
+
+        // The subagent's State change may flip the session-level aggregate
+        // (SubagentActive/SubagentWorking are computed over the collection).
+        // Raise their bindings so WPF re-queries the getters.
+        session.NotifySubagentAggregateChanged();
+
+        FileLogger.Info(
+            $"subagent state applied session={sessionId} agent={agentId} " +
+            $"state={state} tool={activeToolName} source={source}");
+
+        // Re-derive the aggregate subagent-active flag from the collection:
+        // active while any subagent is in a working state. This keeps
+        // SubagentActive (and thus SubagentWorking / the main Reconcile gate)
+        // accurate as subagents transition to terminal states.
+        var anyWorking = false;
+        lock (session.SubagentsLock)
+        {
+            for (int i = 0; i < session.Subagents.Count; i++)
+            {
+                if (session.Subagents[i].IsWorking)
+                {
+                    anyWorking = true;
+                    break;
+                }
+            }
+        }
+
+        // If no subagent is working anymore, clear the hook-set scalar flag
+        // so SubagentActive reflects reality and the main Reconcile can run.
+        // The row itself stays (removed by SubagentStop / watcher fallback).
+        if (!anyWorking && session.SubagentActive)
+        {
+            session.SubagentActive = false;
+        }
+
+        session.LastUpdated = DateTime.Now;
+
+        StatusChanged?.Invoke(this, new SessionStatusChangedEventArgs
+        {
+            SessionId = sessionId,
+            OldStatus = session.Status,
+            NewStatus = session.Status,
+            Session = session,
+            SubagentChanged = true
+        });
+
+        // Re-run the main-agent reconcile: a subagent transitioning to a
+        // terminal state may allow the main agent to resume (e.g. main was
+        // held Idle while the subagent worked; now it can reflect its own
+        // transcript/hook state).
+        Reconcile(sessionId);
+
+        // Terminal state: schedule the row's removal after a short display
+        // window so the user sees the "done"/"failed" transition before the
+        // row disappears. The row is not removed here so the UI can render
+        // the terminal state briefly.
+        if (state == SubagentState.Completed || state == SubagentState.Failed)
+        {
+            ScheduleSubagentRemoval(sessionId, agentId,
+                TimeSpan.FromSeconds(SubagentTerminalDisplaySeconds));
+        }
+    }
+
+    /// <summary>
+    /// Schedule a one-shot removal of a terminal subagent's row after
+    /// <paramref name="delay"/>. Lets the UI show the Completed/Failed
+    /// transition briefly before the row is taken down. Replaces any pending
+    /// removal timer for the same agent (idempotent). The timer callback
+    /// invokes <see cref="RemoveSubagent"/>, which clears the row, the
+    /// association, the tail, and the scalar SubagentActive flag.
+    /// </summary>
+    private void ScheduleSubagentRemoval(string sessionId, string agentId, TimeSpan delay)
+    {
+        // Cancel any previously-scheduled removal for this agent (e.g. a
+        // Completed immediately followed by a Failed).
+        if (_subagentRemovalTimers.TryRemove(agentId, out var oldTimer))
+            oldTimer.Dispose();
+
+        var timer = new System.Threading.Timer(_ =>
+        {
+            _subagentRemovalTimers.TryRemove(agentId, out var self);
+            self?.Dispose();
+            FileLogger.Info($"subagent terminal removal firing session={sessionId} agent={agentId}");
+            RemoveSubagent(sessionId, agentId);
+        }, null, delay, Timeout.InfiniteTimeSpan);
+
+        _subagentRemovalTimers[agentId] = timer;
+        FileLogger.Info(
+            $"subagent terminal removal scheduled session={sessionId} agent={agentId} in {delay.TotalSeconds}s");
+    }
+
+    /// <summary>
+    /// Record the Main↔Subagent association (TASKS.md §5.3). Called when a
+    /// subagent is first observed (by the watcher's UpdateSubagents path or
+    /// by the spawning hook). Maps the agent id to its owning session id so
+    /// <see cref="UpdateSubagentState"/> can route state updates without
+    /// scanning. Idempotent.
+    /// </summary>
+    public void RegisterSubagentAssociation(string agentId, string sessionId)
+    {
+        if (string.IsNullOrEmpty(agentId) || string.IsNullOrEmpty(sessionId)) return;
+        _subagentToSession[agentId] = sessionId;
+    }
+
+    /// <summary>
+    /// Track an in-flight main-agent tool call by its tool_use_id (PreToolUse).
+    /// Idempotent. The presence of active tools switches the watchdog to its
+    /// long-timeout tier so a long tool run is not interrupted (§3.2).
+    /// </summary>
+    public void TrackTool(string sessionId, string toolUseId)
+    {
+        if (!_sessions.TryGetValue(sessionId, out var session)) return;
+        session.TrackTool(toolUseId);
+    }
+
+    /// <summary>
+    /// Untrack a tool call by tool_use_id (PostToolUse). Idempotent; ignores
+    /// unknown ids. After untracking, the caller should refresh the busy timer
+    /// so the short timeout tier reapplies if no tools remain in flight.
+    /// </summary>
+    public void UntrackTool(string sessionId, string toolUseId)
+    {
+        if (!_sessions.TryGetValue(sessionId, out var session)) return;
+        session.UntrackTool(toolUseId);
+    }
+
+    /// <summary>
+    /// Whether the session has in-flight main-agent tool calls. Used by the
+    /// Stop/StopFailure path to detect event-chain breakage (§3.6).
+    /// </summary>
+    public bool HasActiveOperations(string sessionId)
+    {
+        return _sessions.TryGetValue(sessionId, out var session) && session.HasActiveOperations;
+    }
+
+    /// <summary>Clear all in-flight tool ids for a session (on Stop/StopFailure).</summary>
+    public void ClearActiveTools(string sessionId)
+    {
+        if (!_sessions.TryGetValue(sessionId, out var session)) return;
+        session.ClearActiveTools();
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    //  Phase 2: Transcript-driven state (TASKS.md §4)
+    // ──────────────────────────────────────────────────────────────────
+    //  The transcript is the authoritative source of truth. These methods
+    //  are called by TranscriptTailer when it observes tool_use,
+    //  tool_result, or a turn-end signal in the JSONL. They update the
+    //  session's transcript-derived fields and trigger a reconcile, which
+    //  may override the hook-driven Status. Hooks remain the low-latency
+    //  path; the transcript corrects drift once it lands on disk.
+
+    /// <summary>
+    /// Grace period during which a hook-driven Busy is trusted while waiting
+    /// for the transcript to confirm (§4.3). The transcript has a small
+    /// write delay, so a PreToolUse hook arrives before the corresponding
+    /// tool_use line. Within this window, hook Busy wins; after it, if the
+    /// transcript has not confirmed, the state is marked unconfirmed.
+    /// </summary>
+    private const int GracePeriodSeconds = 2;
+
+    /// <summary>
+    /// Reconciler poll interval. The reconciler runs on transcript events
+    /// (immediate) AND on this timer, so that grace-period expiry and
+    /// unconfirmed states are resolved even without new transcript lines.
+    /// </summary>
+    private const int ReconcilePollMs = 2000;
+
+    private System.Threading.Timer? _reconcileTimer;
+    private TranscriptTailer? _transcriptTailer;
+
+    /// <summary>
+    /// Attach the transcript tailer. Set by the app at startup so that
+    /// AddSession/RemoveSession can activate/deactivate tailing.
+    /// </summary>
+    public void SetTranscriptTailer(TranscriptTailer tailer)
+    {
+        _transcriptTailer = tailer;
+    }
+
+    /// <summary>Start the reconciler background timer. Call once at startup.</summary>
+    public void StartReconciler()
+    {
+        if (_reconcileTimer != null) return;
+        _reconcileTimer = new System.Threading.Timer(_ => ReconcileAll(), null,
+            ReconcilePollMs, ReconcilePollMs);
+    }
+
+    private void ReconcileAll()
+    {
+        foreach (var sessionId in _sessions.Keys)
+        {
+            try { Reconcile(sessionId); }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Reconcile error for {sessionId}: {ex.Message}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// The transcript observed a tool_use (assistant entry) — the main agent
+    /// is authoritatively starting a tool. Records it on the session and
+    /// reconciles. If no PreToolUse hook announced this tool, logs a
+    /// <c>hook_missed</c> anomaly (§4.3).
+    /// </summary>
+    public void OnTranscriptToolUse(string sessionId, string toolUseId)
+    {
+        if (!_sessions.TryGetValue(sessionId, out var session)) return;
+        session.RecordTranscriptToolUse(toolUseId);
+        var hookTracked = session.IsToolHookTracked(toolUseId);
+        FileLogger.Info($"transcript tool_use {sessionId}: id={toolUseId} hookTracked={hookTracked}");
+
+        // The transcript observing a tool_use confirms the current hook-driven
+        // Busy period. This suppresses grace_expired for the rest of the turn:
+        // once the hook Busy has been confirmed, a later between-tools gap or
+        // a wait-for-Stop is normal, not a lost confirmation.
+        session.MarkHookBusyConfirmedByTranscript();
+
+        // The hook path lags the transcript by ~80-200ms (hook exe cold-start
+        // + HTTP round-trip vs. direct transcript write), so a transcript
+        // tool_use usually arrives BEFORE its PreToolUse. Do NOT flag
+        // hook_missed here — that would fire on nearly every tool. Instead
+        // record the id with a grace window; TrackTool clears it when the
+        // PreToolUse arrives, and the reconciler tick flags it as hook_missed
+        // only if the window elapses with no confirmation (a genuine loss).
+        if (!hookTracked)
+        {
+            session.MarkPendingHookConfirm(toolUseId, DateTime.UtcNow);
+        }
+
+        Reconcile(sessionId);
+    }
+
+    /// <summary>
+    /// The transcript observed a tool_result (user entry) pairing a tool_use.
+    /// Records it on the session and reconciles.
+    /// </summary>
+    public void OnTranscriptToolResult(string sessionId, string toolUseId)
+    {
+        if (!_sessions.TryGetValue(sessionId, out var session)) return;
+        session.RecordTranscriptToolResult(toolUseId);
+        FileLogger.Info($"transcript tool_result {sessionId}: id={toolUseId} unpaired={session.TranscriptHasUnpairedToolUse}");
+        Reconcile(sessionId);
+    }
+
+    /// <summary>
+    /// The transcript observed a turn-end signal (system.stop_hook_summary) —
+    /// the main agent is authoritatively Idle. Clears any unpaired tool_use
+    /// (logging an anomaly if any) and reconciles to Idle.
+    ///
+    /// Stale-stop guard: the transcript tailer can lag behind the hook path
+    /// (the grace period exists precisely for this). If a stop_hook_summary
+    /// from the PREVIOUS turn arrives after the hook path has already marked
+    /// the CURRENT turn Busy (HookBusyAtUtc set), and the stop's own timestamp
+    /// predates that Busy start, the stop is stale — applying it would flip
+    /// the current turn to Idle (rule 2) until the current tool_use lands,
+    /// causing a Busy→Idle→Busy flicker. Ignore it.
+    /// </summary>
+    public void OnTranscriptTurnEnd(string sessionId, DateTime atUtc)
+    {
+        if (!_sessions.TryGetValue(sessionId, out var session)) return;
+        if (session.HookBusyAtUtc is not null && atUtc < session.HookBusyAtUtc.Value)
+        {
+            FileLogger.Info($"transcript turn_end {sessionId}: STALE stop at {atUtc:o} ignored (hook Busy since {session.HookBusyAtUtc:o})");
+            return;
+        }
+        var hadUnpaired = session.TranscriptHasUnpairedToolUse;
+        session.RecordTranscriptTurnEnd(atUtc);
+        FileLogger.Info($"transcript turn_end {sessionId}: at {atUtc:o} hadUnpaired={hadUnpaired}");
+        Reconcile(sessionId);
+    }
+
+    /// <summary>
+    /// Run the fusion state machine for a session: derive the authoritative
+    /// main-agent status from the transcript fields (authoritative) and the
+    /// hook state (low-latency, with grace period), and apply it to
+    /// <see cref="SessionInfo.Status"/> if it differs (§4.4).
+    ///
+    /// Priority:
+    ///  1. Transcript unpaired tool_use → Busy (authoritative)
+    ///  2. Transcript turn-end (stop_hook_summary) → Idle (authoritative)
+    ///  3. Hook Busy within grace period → Busy (transcript write delay)
+    ///  4. Hook Idle → Idle
+    ///  5. Otherwise: keep last known status
+    /// </summary>
+    public void Reconcile(string sessionId)
+    {
+        if (!_sessions.TryGetValue(sessionId, out var session)) return;
+
+        // While a subagent is active, the main agent is waiting — main stays
+        // Idle regardless of transcript/hook main-agent signals. The
+        // SubagentWatcher already enforces this; skip main reconcile to avoid
+        // fighting it.
+        if (session.SubagentActive) return;
+
+        var now = DateTime.UtcNow;
+
+        // Drain transcript tool_uses whose PreToolUse hook grace window has
+        // elapsed without confirmation. These are genuine hook misses (the
+        // hook lag of ~200ms is well within the window, so a surviving entry
+        // means the PreToolUse was truly lost). Logged here so both the 2s
+        // tick and event-driven reconciles surface them promptly.
+        var missed = session.DrainExpiredPendingHookConfirms(now);
+        foreach (var id in missed)
+        {
+            session.AddAnomaly(new AnomalyRecord(
+                "hook_missed", now,
+                $"transcript tool_use {id} not confirmed by a PreToolUse hook within grace window"));
+        }
+
+        var derived = DeriveMainState(session, now, out var source);
+
+        if (session.Status != derived)
+        {
+            ApplyReconciledStatus(sessionId, session, derived, source);
+        }
+        else if (session.StateSource != source)
+        {
+            // Status unchanged but source changed — update for reporting.
+            session.StateSource = source;
+        }
+    }
+
+    /// <summary>
+    /// Derive the authoritative main-agent status from transcript + hook
+    /// state (§4.4). Returns the derived status and the source that
+    /// determined it.
+    /// </summary>
+    private SessionStatus DeriveMainState(SessionInfo session, DateTime nowUtc, out StateSource source)
+    {
+        // 1. Transcript unpaired tool_use → Busy (authoritative).
+        if (session.TranscriptHasUnpairedToolUse)
+        {
+            source = StateSource.Transcript;
+            return SessionStatus.Busy;
+        }
+
+        // 2. Transcript turn-end seen and no unpaired tools → Idle
+        //    (authoritative). We treat the presence of a recent stop as
+        //    authoritative Idle until a new tool_use or user prompt arrives.
+        if (session.TranscriptLastStopUtc is not null)
+        {
+            source = StateSource.Transcript;
+            return SessionStatus.Idle;
+        }
+
+        // 3. Hook Busy within grace period → trust the hook (transcript
+        //    write delay). The hook fired PreToolUse/UserPromptSubmit before
+        //    the transcript line landed.
+        if (session.HookState == SessionStatus.Busy &&
+            session.HookBusyAtUtc is not null &&
+            (nowUtc - session.HookBusyAtUtc.Value).TotalSeconds <= GracePeriodSeconds)
+        {
+            source = StateSource.Reconciled;
+            return SessionStatus.Busy;
+        }
+
+        // 4. Hook Busy but grace period expired without transcript
+        //    confirmation → keep Busy but mark unconfirmed (anomaly). The
+        //    alternative (flipping to Idle) would flicker on slow transcript
+        //    writes; instead we hold and let the watchdog handle a true loss.
+        if (session.HookState == SessionStatus.Busy)
+        {
+            if (session.HookBusyAtUtc is not null &&
+                (nowUtc - session.HookBusyAtUtc.Value).TotalSeconds > GracePeriodSeconds)
+            {
+                // Grace expired without transcript confirmation. Log ONCE per
+                // Busy period (the flag is reset when the hook next sets Busy)
+                // so the 2s reconcile tick does not flood the anomaly list.
+                //
+                // Suppress when the hook is actively tracking a tool
+                // (HasActiveOperations), when a transcript tool_use is still
+                // within its PreToolUse grace window (HasPendingHookConfirm),
+                // or when the transcript has ALREADY confirmed this Busy
+                // period (HookBusyConfirmedByTranscript). The first two cover
+                // hook lag; the third covers the normal between-tools gap or
+                // wait-for-Stop that follows a confirmed tool — not a lost
+                // confirmation. A genuinely stuck tool is handled by the 30min
+                // watchdog (watchdog_timeout_with_active_ops); a truly
+                // unconfirmed hook (no active tool, no pending confirmation,
+                // never confirmed, no transcript line) still logs here.
+                if (!session.HasActiveOperations
+                    && !session.HasPendingHookConfirm
+                    && !session.HookBusyConfirmedByTranscript
+                    && !session.GraceExpiredLogged)
+                {
+                    session.AddAnomaly(new AnomalyRecord(
+                        "grace_expired", nowUtc,
+                        "hook Busy not confirmed by transcript within grace period"));
+                    session.MarkGraceExpiredLogged();
+                }
+            }
+            source = StateSource.Reconciled;
+            return SessionStatus.Busy;
+        }
+
+        // 5. Hook Idle → Idle.
+        if (session.HookState == SessionStatus.Idle)
+        {
+            source = StateSource.Hook;
+            return SessionStatus.Idle;
+        }
+
+        // 6. Fallback: keep last known status.
+        source = session.StateSource;
+        return session.Status;
+    }
+
+    /// <summary>
+    /// Apply a reconciled status to a session. This is the single point that
+    /// writes <see cref="SessionInfo.Status"/> from the reconciler. It
+    /// manages the watchdog timer and raises the usual change events, so the
+    /// UI and tray update exactly as they would for a hook-driven change.
+    /// </summary>
+    private void ApplyReconciledStatus(string sessionId, SessionInfo session,
+        SessionStatus newStatus, StateSource source)
+    {
+        var oldStatus = session.Status;
+        session.StateSource = source;
+        session.Status = newStatus;
+        session.LastUpdated = DateTime.Now;
+
+        // Reconciler-driven transitions are the most diagnostic: they show
+        // the transcript overriding the hook (or vice versa). Log every one
+        // so the state-machine trace is reconstructable from the log file.
+        FileLogger.Info(
+            $"reconcile {sessionId}: {oldStatus}->{newStatus} source={source} " +
+            $"hook={session.HookState} unpaired={session.TranscriptHasUnpairedToolUse} " +
+            $"stopUtc={session.TranscriptLastStopUtc?.ToString("o") ?? "null"}");
+
+        if (newStatus == SessionStatus.Busy)
+        {
+            StartOrResetBusyTimer(sessionId);
+        }
+        else
+        {
+            StopBusyTimer(sessionId);
+        }
+
+        StatusChanged?.Invoke(this, new SessionStatusChangedEventArgs
+        {
+            SessionId = sessionId,
+            OldStatus = oldStatus,
+            NewStatus = newStatus,
+            Session = session,
+        });
+        SessionsChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// Record a compaction event for a session WITHOUT resetting its state
+    /// (TASKS.md §3.5). Compaction is a continuation of the current session,
+    /// not a new one: ActiveTools, Subagents, and the Busy/Idle status must be
+    /// preserved. If the session is unknown (compact arrived before
+    /// SessionStart, an unusual ordering), fall back to AddSession so it is at
+    /// least tracked.
+    /// </summary>
+    public void MarkCompacting(string sessionId, string projectPath = "")
+    {
+        if (!_sessions.TryGetValue(sessionId, out var session))
+        {
+            AddSession(sessionId, projectPath);
+            return;
+        }
+        // Compaction starts a fresh transcript file: the old tool_use /
+        // tool_result pairings and the previous turn-end marker no longer
+        // correspond to anything on disk. Clear the transcript-derived turn
+        // state so the reconciler does not act on stale signals. Hook-derived
+        // state (ActiveTools, Subagents, Status) is preserved per §3.5 —
+        // compaction is a continuation, not a new session.
+        session.ClearTranscriptTools();
+        session.ClearTranscriptTurnEnd();
+        // Re-arm the tailer so its offset re-initializes to the new file's
+        // EOF. Compact rewrites the transcript from scratch; if the new file
+        // is larger than the old offset, the tailer would otherwise read
+        // stale bytes from the middle of the new file. Deactivate+Activate
+        // drops the old offset and starts fresh (only NEW appends read).
+        if (_transcriptTailer is not null && !string.IsNullOrEmpty(projectPath))
+        {
+            _transcriptTailer.DeactivateFile(sessionId);
+            _transcriptTailer.ActivateFile(sessionId, projectPath);
+        }
+        session.LastUpdated = DateTime.Now;
+        System.Diagnostics.Debug.WriteLine(
+            $"[CC-Pulse] compact: session {sessionId} state preserved ({session.Status})");
+    }
+
+    /// <summary>
+    /// Log a state-machine anomaly for later analysis (TASKS.md §3.6). Examples:
+    /// a Stop received while tools are still in flight (event-chain breakage),
+    /// or a watchdog timeout while tools are in flight. Writes to Debug output.
+    /// </summary>
+    public void LogAnomaly(string sessionId, string type)
+    {
+        if (!_sessions.TryGetValue(sessionId, out var session)) return;
+        var activeOps = session.HasActiveOperations;
+        System.Diagnostics.Debug.WriteLine(
+            $"[CC-Pulse] anomaly: {type} session={sessionId} status={session.Status} activeOps={activeOps}");
+    }
+
     /// <summary>Remove a session (session ended).</summary>
     public void RemoveSession(string sessionId)
     {
         StopBusyTimer(sessionId);
         StopSubagentTimer(sessionId);
         _subagentWatcher?.UnregisterSession(sessionId);
+        _transcriptTailer?.DeactivateFile(sessionId);
 
-        if (_sessions.TryRemove(sessionId, out var session))
+        // Clean up all subagent associations and tails for this session.
+        if (_sessions.TryGetValue(sessionId, out var session))
+        {
+            List<string> agentIds;
+            lock (session.SubagentsLock)
+            {
+                agentIds = session.Subagents.Select(s => s.AgentId).ToList();
+            }
+            foreach (var agentId in agentIds)
+            {
+                _subagentToSession.TryRemove(agentId, out _);
+                _subagentWatcher?.DeactivateSubagent(agentId);
+                if (_subagentRemovalTimers.TryRemove(agentId, out var removalTimer))
+                    removalTimer.Dispose();
+            }
+        }
+
+        if (_sessions.TryRemove(sessionId, out session))
         {
             StatusChanged?.Invoke(this, new SessionStatusChangedEventArgs
             {
@@ -451,16 +1191,50 @@ public class SessionManager : IDisposable
     }
 
     /// <summary>
-    /// Start or reset the watchdog timer for a Busy session.
-    /// If the timer expires, the session is automatically set to Idle.
+    /// Start or reset the watchdog timer for a Busy session. The timeout is
+    /// tiered (TASKS.md §3.2): the short 60s timeout guards against a lost
+    /// Stop hook during thinking/streaming, while the 30min long timeout
+    /// applies when a tool is in flight (ActiveTools non-empty) so a long
+    /// tool run is not interrupted. If the long timeout still expires, an
+    /// anomaly is logged before the reset (§3.6).
     /// </summary>
     private void StartOrResetBusyTimer(string sessionId)
     {
+        if (!_sessions.TryGetValue(sessionId, out var session))
+        {
+            StartOrResetBusyTimer(sessionId, BusyTimeoutSeconds, hasActiveOps: false);
+            return;
+        }
+        var hasActiveOps = session.HasActiveOperations;
+        var timeout = hasActiveOps ? LongBusyTimeoutSeconds : BusyTimeoutSeconds;
+        StartOrResetBusyTimer(sessionId, timeout, hasActiveOps);
+    }
+
+    /// <summary>Timer factory with a chosen timeout and anomaly context.</summary>
+    private void StartOrResetBusyTimer(string sessionId, int timeoutSeconds, bool hasActiveOps)
+    {
         var timer = new System.Threading.Timer(_ =>
         {
-            // Timer expired — no activity detected, reset to Idle
+            // The timer may have been superseded (a concurrent StartOrReset
+            // replaced it in _busyTimers but this callback was already
+            // queued) or the session may have already gone Idle by another
+            // path (hook Stop, reconciler, subagent). Re-check before acting
+            // so a stale callback does not flip a now-Idle (or removed)
+            // session, and so two overlapping timers cannot both fire.
+            if (!_sessions.TryGetValue(sessionId, out var s) ||
+                s.Status != SessionStatus.Busy)
+                return;
+
+            // Timer expired — no activity detected within the window.
+            if (hasActiveOps)
+            {
+                // A tool was in flight but never completed (PostToolUse lost,
+                // or a genuinely stuck tool). Log the anomaly before resetting
+                // so the event-chain breakage is visible for analysis (§3.6).
+                LogAnomaly(sessionId, "watchdog_timeout_with_active_ops");
+            }
             UpdateStatus(sessionId, SessionStatus.Idle);
-        }, null, TimeSpan.FromSeconds(BusyTimeoutSeconds), Timeout.InfiniteTimeSpan);
+        }, null, TimeSpan.FromSeconds(timeoutSeconds), Timeout.InfiniteTimeSpan);
 
         var oldTimer = _busyTimers.GetValueOrDefault(sessionId);
         _busyTimers[sessionId] = timer;
@@ -515,6 +1289,13 @@ public class SessionManager : IDisposable
         foreach (var timer in _subagentTimers.Values)
             timer.Dispose();
         _subagentTimers.Clear();
+
+        foreach (var timer in _subagentRemovalTimers.Values)
+            timer.Dispose();
+        _subagentRemovalTimers.Clear();
+
+        _reconcileTimer?.Dispose();
+        _reconcileTimer = null;
 
         _sessions.Clear();
     }
