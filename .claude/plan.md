@@ -140,3 +140,19 @@ session 移除路径（`RemoveSession`）里清除该 session 所有 subagent �
    - 若 tailer 误判 Completed → 行移除 → 但 watcher **不重新加行**（日志无 `subagent state ... Pending` 重现）
    - 若文件在终态后增长 → 日志出现 `subagent terminal override (file grew)`，行重新出现并从新行派生正确状态（非卡 Pending）
 4. 正常 subagent（短间隙）→ Completed → 3s 后行消失，无重现
+
+## 实现状态
+
+- **缺陷 1**（WaitingApi + main 细粒度状态机）：已实现，提交 `80da045`。
+  - `ProcessUser` 重构：timestamp 提前提取；content 数组配对 tool_result；
+    字符串/其他 content 视为纯 user 消息；不含 tool_result 即调
+    `OnTranscriptUserMessage`。
+  - main 细粒度状态机（MainAgentState）一并引入：Idle/Thinking/
+    ToolRunning/WaitingApi/WaitingUser，由 DeriveMainFineState 派生。
+- **缺陷 2**（subagent 假终态闪烁）：已实现，提交 `5598418`。
+  - 终态记忆 `_terminalAt` + 文件增长逃生阀；IdleToCompletedSeconds 40s。
+- **构建**：`dotnet build` 编译 0 警告 0 错误（C#+XAML 全通过）。完整
+  build 的 exe 复制阶段因 ClaudeMonitor.exe 正在运行被锁，非代码问题；
+  关闭应用后即可完整生成。
+- **运行时验证**（验证项 2-4）：需启动应用实测，未在此自动完成。
+
