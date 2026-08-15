@@ -51,6 +51,28 @@ public class SessionManager : IDisposable
     private readonly ConcurrentDictionary<string, System.Threading.Timer> _subagentTimers = new();
 
     /// <summary>
+    /// Per-agent one-shot removal timers. When a subagent reaches a terminal
+    /// state (Completed/Failed), <see cref="UpdateSubagentState"/> schedules a
+    /// removal after a short delay so the UI can show the terminal transition
+    /// (e.g. "done" in green) before the row disappears. Keyed by agent id.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, System.Threading.Timer> _subagentRemovalTimers = new();
+
+    /// <summary>How long a terminal subagent row is shown before removal.</summary>
+    private const int SubagentTerminalDisplaySeconds = 3;
+
+    /// <summary>
+    /// Main↔Subagent association table (TASKS.md §5.3): maps a subagent's
+    /// agent id to the main session id that spawned it. Populated when a
+    /// subagent is discovered (via <see cref="SubagentWatcher"/> or the
+    /// spawning hook) and used to route subagent state updates back to the
+    /// owning session without scanning every session. Entries are removed
+    /// when the subagent's row is removed (SubagentStop hook, watcher stale
+    /// eviction, or session end).
+    /// </summary>
+    private readonly ConcurrentDictionary<string, string> _subagentToSession = new();
+
+    /// <summary>
     /// Filesystem watcher that authoritatively detects subagent activity by
     /// scanning each session's subagents/ directory. May be null when the
     /// SessionManager is used standalone (e.g. CLI). Set by the app at startup.
@@ -350,7 +372,13 @@ public class SessionManager : IDisposable
             for (int i = current.Count - 1; i >= 0; i--)
             {
                 if (!activeById.ContainsKey(current[i].AgentId))
+                {
+                    var removedAgentId = current[i].AgentId;
                     current.RemoveAt(i);
+                    // Clean up association table and stop tailing this subagent.
+                    _subagentToSession.TryRemove(removedAgentId, out _);
+                    _subagentWatcher?.DeactivateSubagent(removedAgentId);
+                }
             }
 
             // Update surviving rows and append new ones, preserving the active
@@ -368,6 +396,7 @@ public class SessionManager : IDisposable
                     if (dst.AgentType != src.AgentType) dst.AgentType = src.AgentType;
                     if (dst.Description != src.Description) dst.Description = src.Description;
                     if (dst.DisplayName != src.DisplayName) dst.DisplayName = src.DisplayName;
+                    if (dst.LastActivityUtc != src.LastActivityUtc) dst.LastActivityUtc = src.LastActivityUtc;
                 }
                 else
                 {
@@ -377,9 +406,13 @@ public class SessionManager : IDisposable
                         AgentType = src.AgentType,
                         Description = src.Description,
                         DisplayName = src.DisplayName,
+                        LastActivityUtc = src.LastActivityUtc,
                     };
                     current.Add(info);
                     existingById[src.AgentId] = info;
+                    // Register the Main↔Subagent association so subsequent
+                    // SubagentTailer state updates route to this session.
+                    RegisterSubagentAssociation(src.AgentId, sessionId);
                 }
             }
         }
@@ -453,6 +486,13 @@ public class SessionManager : IDisposable
     public void RemoveSubagent(string sessionId, string agentId)
     {
         if (string.IsNullOrEmpty(agentId)) return;
+
+        // Cancel any pending terminal-removal timer for this agent (the row
+        // is being removed now by another path — hook, watcher fallback, or
+        // session end — so the scheduled removal is obsolete).
+        if (_subagentRemovalTimers.TryRemove(agentId, out var pendingTimer))
+            pendingTimer.Dispose();
+
         if (!_sessions.TryGetValue(sessionId, out var session)) return;
 
         var current = session.Subagents;
@@ -469,6 +509,13 @@ public class SessionManager : IDisposable
                 }
             }
         }
+
+        // Clean up the association table and stop tailing this subagent
+        // regardless of whether the row was present (the row may have already
+        // been aged out by the watcher, but the tailer/association may still
+        // linger).
+        _subagentToSession.TryRemove(agentId, out _);
+        _subagentWatcher?.DeactivateSubagent(agentId);
 
         if (!removed)
         {
@@ -514,6 +561,197 @@ public class SessionManager : IDisposable
     public bool IsSubagentActive(string sessionId)
     {
         return _sessions.TryGetValue(sessionId, out var session) && session.SubagentActive;
+    }
+
+    /// <summary>
+    /// Update a subagent's fine-grained internal state (TASKS.md §5.2/§6).
+    /// Called by <see cref="SubagentTailer"/> via
+    /// <see cref="SubagentWatcher"/> whenever the subagent's transcript
+    /// yields a new derived state (Thinking/ToolRunning/WaitingApi/Completed/Failed).
+    /// Locates the <see cref="SubagentInfo"/> row by agent id across all
+    /// sessions (subagent ids are globally unique), updates its State /
+    /// ActiveToolName / StateSource, and raises a SubagentChanged event so
+    /// the UI refreshes the subagent row's text and color.
+    ///
+    /// <para>Side effects on terminal states:</para>
+    /// <list type="bullet">
+    /// <item><see cref="SubagentState.Completed"/> / <see cref="SubagentState.Failed"/>:
+    /// the subagent has finished. We do NOT remove the row here — the
+    /// SubagentStop hook (or the watcher's stale-window fallback) owns row
+    /// removal. We only update the state so the UI can show the brief
+    /// terminal transition. The main-agent Reconcile is re-run so main can
+    /// resume Busy/Idle now that the subagent is no longer working.</item>
+    /// </list>
+    /// </summary>
+    public void UpdateSubagentState(string agentId, SubagentState state,
+        string activeToolName, StateSource source)
+    {
+        if (string.IsNullOrEmpty(agentId)) return;
+
+        // Route via the association table (fast path).
+        SessionInfo? session = null;
+        string? sessionId = null;
+        if (_subagentToSession.TryGetValue(agentId, out var sid) &&
+            _sessions.TryGetValue(sid, out session))
+        {
+            sessionId = sid;
+        }
+        else
+        {
+            // Association not yet established — scan sessions. This happens
+            // when the tailer fires before the watcher's UpdateSubagents
+            // registered the agent id (a race during subagent spawn).
+            foreach (var kvp in _sessions)
+            {
+                SubagentInfo? row = null;
+                lock (kvp.Value.SubagentsLock)
+                {
+                    for (int i = 0; i < kvp.Value.Subagents.Count; i++)
+                    {
+                        if (string.Equals(kvp.Value.Subagents[i].AgentId, agentId,
+                            StringComparison.Ordinal))
+                        {
+                            row = kvp.Value.Subagents[i];
+                            break;
+                        }
+                    }
+                }
+                if (row is not null)
+                {
+                    session = kvp.Value;
+                    sessionId = kvp.Key;
+                    _subagentToSession[agentId] = sessionId;
+                    break;
+                }
+            }
+        }
+
+        if (session is null || sessionId is null) return;
+
+        SubagentInfo? target = null;
+        lock (session.SubagentsLock)
+        {
+            for (int i = 0; i < session.Subagents.Count; i++)
+            {
+                if (string.Equals(session.Subagents[i].AgentId, agentId,
+                    StringComparison.Ordinal))
+                {
+                    target = session.Subagents[i];
+                    break;
+                }
+            }
+        }
+
+        if (target is null) return;
+
+        // Update the fine-grained fields. SetField raises PropertyChanged for
+        // State, which cascades to IsWorking/Confidence in SubagentInfo.
+        target.State = state;
+        target.ActiveToolName = activeToolName;
+        target.StateSource = source;
+        target.LastActivityUtc = DateTime.UtcNow;
+
+        // The subagent's State change may flip the session-level aggregate
+        // (SubagentActive/SubagentWorking are computed over the collection).
+        // Raise their bindings so WPF re-queries the getters.
+        session.NotifySubagentAggregateChanged();
+
+        FileLogger.Info(
+            $"subagent state applied session={sessionId} agent={agentId} " +
+            $"state={state} tool={activeToolName} source={source}");
+
+        // Re-derive the aggregate subagent-active flag from the collection:
+        // active while any subagent is in a working state. This keeps
+        // SubagentActive (and thus SubagentWorking / the main Reconcile gate)
+        // accurate as subagents transition to terminal states.
+        var anyWorking = false;
+        lock (session.SubagentsLock)
+        {
+            for (int i = 0; i < session.Subagents.Count; i++)
+            {
+                if (session.Subagents[i].IsWorking)
+                {
+                    anyWorking = true;
+                    break;
+                }
+            }
+        }
+
+        // If no subagent is working anymore, clear the hook-set scalar flag
+        // so SubagentActive reflects reality and the main Reconcile can run.
+        // The row itself stays (removed by SubagentStop / watcher fallback).
+        if (!anyWorking && session.SubagentActive)
+        {
+            session.SubagentActive = false;
+        }
+
+        session.LastUpdated = DateTime.Now;
+
+        StatusChanged?.Invoke(this, new SessionStatusChangedEventArgs
+        {
+            SessionId = sessionId,
+            OldStatus = session.Status,
+            NewStatus = session.Status,
+            Session = session,
+            SubagentChanged = true
+        });
+
+        // Re-run the main-agent reconcile: a subagent transitioning to a
+        // terminal state may allow the main agent to resume (e.g. main was
+        // held Idle while the subagent worked; now it can reflect its own
+        // transcript/hook state).
+        Reconcile(sessionId);
+
+        // Terminal state: schedule the row's removal after a short display
+        // window so the user sees the "done"/"failed" transition before the
+        // row disappears. The row is not removed here so the UI can render
+        // the terminal state briefly.
+        if (state == SubagentState.Completed || state == SubagentState.Failed)
+        {
+            ScheduleSubagentRemoval(sessionId, agentId,
+                TimeSpan.FromSeconds(SubagentTerminalDisplaySeconds));
+        }
+    }
+
+    /// <summary>
+    /// Schedule a one-shot removal of a terminal subagent's row after
+    /// <paramref name="delay"/>. Lets the UI show the Completed/Failed
+    /// transition briefly before the row is taken down. Replaces any pending
+    /// removal timer for the same agent (idempotent). The timer callback
+    /// invokes <see cref="RemoveSubagent"/>, which clears the row, the
+    /// association, the tail, and the scalar SubagentActive flag.
+    /// </summary>
+    private void ScheduleSubagentRemoval(string sessionId, string agentId, TimeSpan delay)
+    {
+        // Cancel any previously-scheduled removal for this agent (e.g. a
+        // Completed immediately followed by a Failed).
+        if (_subagentRemovalTimers.TryRemove(agentId, out var oldTimer))
+            oldTimer.Dispose();
+
+        var timer = new System.Threading.Timer(_ =>
+        {
+            _subagentRemovalTimers.TryRemove(agentId, out var self);
+            self?.Dispose();
+            FileLogger.Info($"subagent terminal removal firing session={sessionId} agent={agentId}");
+            RemoveSubagent(sessionId, agentId);
+        }, null, delay, Timeout.InfiniteTimeSpan);
+
+        _subagentRemovalTimers[agentId] = timer;
+        FileLogger.Info(
+            $"subagent terminal removal scheduled session={sessionId} agent={agentId} in {delay.TotalSeconds}s");
+    }
+
+    /// <summary>
+    /// Record the Main↔Subagent association (TASKS.md §5.3). Called when a
+    /// subagent is first observed (by the watcher's UpdateSubagents path or
+    /// by the spawning hook). Maps the agent id to its owning session id so
+    /// <see cref="UpdateSubagentState"/> can route state updates without
+    /// scanning. Idempotent.
+    /// </summary>
+    public void RegisterSubagentAssociation(string agentId, string sessionId)
+    {
+        if (string.IsNullOrEmpty(agentId) || string.IsNullOrEmpty(sessionId)) return;
+        _subagentToSession[agentId] = sessionId;
     }
 
     /// <summary>
@@ -921,7 +1159,24 @@ public class SessionManager : IDisposable
         _subagentWatcher?.UnregisterSession(sessionId);
         _transcriptTailer?.DeactivateFile(sessionId);
 
-        if (_sessions.TryRemove(sessionId, out var session))
+        // Clean up all subagent associations and tails for this session.
+        if (_sessions.TryGetValue(sessionId, out var session))
+        {
+            List<string> agentIds;
+            lock (session.SubagentsLock)
+            {
+                agentIds = session.Subagents.Select(s => s.AgentId).ToList();
+            }
+            foreach (var agentId in agentIds)
+            {
+                _subagentToSession.TryRemove(agentId, out _);
+                _subagentWatcher?.DeactivateSubagent(agentId);
+                if (_subagentRemovalTimers.TryRemove(agentId, out var removalTimer))
+                    removalTimer.Dispose();
+            }
+        }
+
+        if (_sessions.TryRemove(sessionId, out session))
         {
             StatusChanged?.Invoke(this, new SessionStatusChangedEventArgs
             {
@@ -1034,6 +1289,10 @@ public class SessionManager : IDisposable
         foreach (var timer in _subagentTimers.Values)
             timer.Dispose();
         _subagentTimers.Clear();
+
+        foreach (var timer in _subagentRemovalTimers.Values)
+            timer.Dispose();
+        _subagentRemovalTimers.Clear();
 
         _reconcileTimer?.Dispose();
         _reconcileTimer = null;

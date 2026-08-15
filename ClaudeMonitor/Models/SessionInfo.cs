@@ -516,8 +516,11 @@ public class SessionInfo : INotifyPropertyChanged
         {
             if (Subagents.Count > 0)
                 HasSubagentActivity = true;
+            else
+                HasSubagentActivity = false;
             OnPropertyChanged(nameof(SubagentActive));
             OnPropertyChanged(nameof(SubagentWorking));
+            OnPropertyChanged(nameof(SubagentStatusText));
             RefreshIsWorking();
         };
     }
@@ -567,10 +570,29 @@ public class SessionInfo : INotifyPropertyChanged
     /// feedback) and the watcher-populated <see cref="Subagents"/> collection
     /// (authoritative). While active, the main agent is waiting, so the main
     /// status shows Idle and a separate subagent row shows Working.
+    ///
+    /// <para>The getter returns true when the hook flag is set OR when any
+    /// subagent in the collection is in a working state
+    /// (<see cref="SubagentInfo.IsWorking"/>). A subagent that has reached a
+    /// terminal state (Completed/Failed) does NOT keep this true, so the
+    /// main-agent Reconcile can resume and the UI subagent row flips to idle.
+    /// The hook flag is cleared by <see cref="Services.SessionManager.UpdateSubagentState"/>
+    /// once all subagents are terminal.</para>
     /// </summary>
     public bool SubagentActive
     {
-        get => _subagentActive || Subagents.Count > 0;
+        get
+        {
+            if (_subagentActive) return true;
+            lock (_subagentsLock)
+            {
+                for (int i = 0; i < Subagents.Count; i++)
+                {
+                    if (Subagents[i].IsWorking) return true;
+                }
+            }
+            return false;
+        }
         set
         {
             if (SetField(ref _subagentActive, value))
@@ -585,12 +607,13 @@ public class SessionInfo : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// Latch: true once a subagent has been detected in this session (via the
-    /// Agent/Task hook or the filesystem watcher). The single subagent status
-    /// row is only visible after this becomes true, so sessions that never
-    /// spawn a subagent show no subagent row at all. Once set it stays true
-    /// for the session's lifetime — the row persists after the last subagent
-    /// finishes and flips to the idle state.
+    /// True while the session has at least one subagent row in its
+    /// <see cref="Subagents"/> collection. The single subagent status row is
+    /// only visible while this is true, so sessions that never spawn a
+    /// subagent show no subagent row at all. Set true when the first subagent
+    /// is added; set false when the collection empties (all subagents have
+    /// reached a terminal state and been removed), so the row disappears
+    /// cleanly rather than lingering as a stale "idle" row.
     /// </summary>
     public bool HasSubagentActivity
     {
@@ -623,16 +646,96 @@ public class SessionInfo : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// True when a subagent is currently running. Binds the subagent indicator
-    /// circle (red while the subagent works; the whole subagent row is hidden
-    /// when false, so the green state is never visible).
+    /// True when a subagent is currently working (in a non-terminal state:
+    /// Pending/Thinking/ToolRunning/WaitingApi). Binds the subagent indicator
+    /// circle (red while the subagent works; green/idle once all subagents
+    /// have reached a terminal state). The subagent row itself stays visible
+    /// (gated by <see cref="HasSubagentActivity"/>) so the idle transition is
+    /// shown briefly before the row is removed by SubagentStop/watcher.
     /// </summary>
     public bool SubagentWorking => SubagentActive;
+
+    /// <summary>
+    /// Localized status text for the subagent row, reflecting the fine-grained
+    /// state of the most active subagent (TASKS.md §5.1/§6). Binds the
+    /// subagent row's TextBlock so the user sees "thinking…", "running: Bash",
+    /// "waiting for API…", "done", or "failed" instead of a generic
+    /// "Working…"/"Idle". Returns the idle label when no subagent is working.
+    /// </summary>
+    public string SubagentStatusText => ComputeSubagentStatusText();
+
+    /// <summary>
+    /// Compute the subagent row text from the current collection. Picks the
+    /// "most active" subagent (ToolRunning > Thinking > WaitingApi > Pending >
+    /// terminal) so a tool-running subagent is reported even when a sibling
+    /// has finished. Returns the idle label when the collection is empty or
+    /// all subagents are terminal.
+    /// </summary>
+    private string ComputeSubagentStatusText()
+    {
+        SubagentInfo? pick = null;
+        int bestRank = -1;
+        lock (_subagentsLock)
+        {
+            for (int i = 0; i < Subagents.Count; i++)
+            {
+                var s = Subagents[i];
+                int rank = s.State switch
+                {
+                    SubagentState.ToolRunning => 5,
+                    SubagentState.Thinking => 4,
+                    SubagentState.WaitingApi => 3,
+                    SubagentState.Pending => 2,
+                    SubagentState.Failed => 1,
+                    SubagentState.Completed => 0,
+                    _ => 0,
+                };
+                if (rank > bestRank)
+                {
+                    bestRank = rank;
+                    pick = s;
+                }
+            }
+        }
+
+        if (pick is null)
+            return ClaudeMonitor.Services.Lang.Get("StatusSubagentIdle");
+
+        return pick.State switch
+        {
+            SubagentState.Pending => ClaudeMonitor.Services.Lang.Get("SubagentStatePending"),
+            SubagentState.Thinking => ClaudeMonitor.Services.Lang.Get("SubagentStateThinking"),
+            SubagentState.ToolRunning => string.IsNullOrEmpty(pick.ActiveToolName)
+                ? ClaudeMonitor.Services.Lang.Get("SubagentStateToolRunningGeneric")
+                : ClaudeMonitor.Services.Lang.Get("SubagentStateToolRunning", pick.ActiveToolName),
+            SubagentState.WaitingApi => ClaudeMonitor.Services.Lang.Get("SubagentStateWaitingApi"),
+            SubagentState.Completed => ClaudeMonitor.Services.Lang.Get("SubagentStateCompleted"),
+            SubagentState.Failed => ClaudeMonitor.Services.Lang.Get("SubagentStateFailed"),
+            _ => ClaudeMonitor.Services.Lang.Get("StatusSubagentIdle"),
+        };
+    }
 
     /// <summary>Recompute IsWorking from main Status only.</summary>
     private void RefreshIsWorking()
     {
         IsWorking = _status == SessionStatus.Busy;
+    }
+
+    /// <summary>
+    /// Notify bindings that the derived subagent aggregate state
+    /// (<see cref="SubagentActive"/>, <see cref="SubagentWorking"/>) may have
+    /// changed because a subagent's <see cref="SubagentInfo.State"/> was
+    /// updated. Called by <see cref="Services.SessionManager.UpdateSubagentState"/>
+    /// after it mutates a row's State. Without this, the computed
+    /// SubagentActive/SubagentWorking getters would return new values but WPF
+    /// would not re-query them (no PropertyChanged was raised for them).
+    /// </summary>
+    internal void NotifySubagentAggregateChanged()
+    {
+        OnPropertyChanged(nameof(SubagentActive));
+        OnPropertyChanged(nameof(SubagentWorking));
+        OnPropertyChanged(nameof(SubagentStatusText));
+        RefreshIsWorking();
     }
 
     /// <summary>

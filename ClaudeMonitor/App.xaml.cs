@@ -82,7 +82,12 @@ public partial class App : System.Windows.Application
         // SubagentWatcher scans each session's subagents/ directory on disk to
         // detect subagent activity authoritatively (the hook path misses
         // subagents when the spawning tool is named "Task" and its SubagentStop
-        // event is unreliable). It reconciles with the hook signals every poll.
+        // event is unreliable). Phase 2 (TASKS.md §5.2): the watcher now drives
+        // a SubagentTailer that incrementally parses each agent-<id>.jsonl and
+        // derives a fine-grained SubagentState (Thinking/ToolRunning/WaitingApi/
+        // Completed/Failed) from the transcript content, instead of relying on
+        // a coarse 20s last-line-timestamp window. The watcher reconciles with
+        // the hook signals every poll.
         _subagentWatcher = new SubagentWatcher(_sessionManager);
         _sessionManager.SetSubagentWatcher(_subagentWatcher);
         _subagentWatcher.Start();

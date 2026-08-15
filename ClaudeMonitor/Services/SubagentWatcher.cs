@@ -18,26 +18,28 @@ namespace ClaudeMonitor.Services;
 /// For each session, Claude Code writes one <c>agent-&lt;id&gt;.jsonl</c> per
 /// subagent under <c>~/.claude/projects/&lt;encodedProj&gt;/&lt;sessionId&gt;/subagents/</c>,
 /// alongside an <c>agent-&lt;id&gt;.meta.json</c> carrying <c>agentType</c> and
-/// <c>description</c>. Subagent files are NOT deleted when the subagent ends,
-/// so activity is judged by the jsonl file's last-write time: if it was
-/// modified within the recent window, the subagent is still working.
+/// <c>description</c>. Subagent files are NOT deleted when the subagent ends.
+///
+/// <para><b>Phase 2 (TASKS.md §5.2):</b> activity is now judged by
+/// <see cref="SubagentTailer"/>, which incrementally parses each
+/// <c>agent-&lt;id&gt;.jsonl</c> and derives a fine-grained
+/// <see cref="SubagentState"/> (Thinking/ToolRunning/WaitingApi/Completed/Failed)
+/// from the entries. The tailer is the authoritative source; the previous
+/// 20s last-line-timestamp window is retained only as a fallback for the case
+/// where the tailer has not yet been attached (e.g. CC-Pulse launched
+/// mid-subagent) or the file disappeared.</para>
 /// </summary>
 public class SubagentWatcher : IDisposable
 {
     /// <summary>
-    /// A subagent whose last jsonl line timestamp falls within this window
-    /// (relative to now) is considered still active. Subagents append lines
-    /// while working and stop appending when done, so a stale last-timestamp
-    /// means the subagent ended.
-    ///
-    /// This is now a FALLBACK: the SubagentStop hook removes a finished
-    /// subagent's row immediately (via SessionManager.RemoveSubagent). This
-    /// window only governs the case where SubagentStop does not fire (some
-    /// modes don't emit it). 20s covers a subagent's think/long-tool gap
-    /// (30s+ with no new line is rare) while keeping the fallback residue
-    /// short. The watcher polls every 2s using the precise per-line timestamp.
+    /// Fallback stale window (seconds). A subagent whose jsonl has had no new
+    /// line within this window AND whose tailer has not reported a state is
+    /// considered ended. This only governs the fallback path; the tailer's
+    /// <see cref="SubagentState.Completed"/>/Failed detection is immediate.
+    /// 20s covers a subagent's think/long-tool gap while keeping fallback
+    /// residue short.
     /// </summary>
-    private const int ActiveWindowSeconds = 20;
+    private const int FallbackStaleSeconds = 20;
 
     /// <summary>Poll interval for re-scanning each session's subagents directory.</summary>
     private const int PollIntervalMs = 2000;
@@ -49,6 +51,7 @@ public class SubagentWatcher : IDisposable
         ".claude", "projects");
 
     private readonly SessionManager _sessionManager;
+    private readonly SubagentTailer _tailer;
     private readonly Dictionary<string, string> _sessionProjects = new();
     private System.Threading.Timer? _pollTimer;
     private readonly object _lock = new();
@@ -57,12 +60,18 @@ public class SubagentWatcher : IDisposable
     public SubagentWatcher(SessionManager sessionManager)
     {
         _sessionManager = sessionManager;
+        _tailer = new SubagentTailer();
+        _tailer.StateChanged += OnSubagentStateChanged;
     }
+
+    /// <summary>The subagent tailer (started by <see cref="Start"/>).</summary>
+    public SubagentTailer Tailer => _tailer;
 
     /// <summary>Start watching. Call once at app startup.</summary>
     public void Start()
     {
         if (_pollTimer != null) return;
+        _tailer.Start();
         _pollTimer = new System.Threading.Timer(PollAllSessions, null,
             PollIntervalMs, PollIntervalMs);
     }
@@ -91,8 +100,18 @@ public class SubagentWatcher : IDisposable
         {
             _sessionProjects.Remove(sessionId);
         }
-        // Clearing the subagent list is handled by SessionManager.RemoveSession
-        // (the session itself is gone), so nothing more to do here.
+        // Deactivation of individual subagent tails is handled by
+        // SessionManager.RemoveSession (which knows the agent ids on the
+        // session). Nothing more to do here.
+    }
+
+    /// <summary>
+    /// Stop tailing a specific subagent (e.g. when its row is removed by the
+    /// SubagentStop hook or when the session ends). Called by SessionManager.
+    /// </summary>
+    public void DeactivateSubagent(string agentId)
+    {
+        _tailer.DeactivateSubagent(agentId);
     }
 
     private void PollAllSessions(object? state)
@@ -118,7 +137,9 @@ public class SubagentWatcher : IDisposable
 
     /// <summary>
     /// Scan one session's subagents directory and update the SessionManager
-    /// with the current set of active subagents.
+    /// with the current set of active subagents. For each discovered
+    /// <c>agent-&lt;id&gt;.jsonl</c>, activate the <see cref="SubagentTailer"/>
+    /// so its state is derived authoritatively from the transcript content.
     /// </summary>
     private void PollSession(string sessionId, string projectPath)
     {
@@ -135,29 +156,52 @@ public class SubagentWatcher : IDisposable
 
         foreach (var jsonlPath in Directory.EnumerateFiles(subagentsDir, "agent-*.jsonl"))
         {
-            // Judge activity by the timestamp on the LAST jsonl line (UTC,
-            // precise to the millisecond) rather than the file's last-write
-            // time. Windows NTFS mtime for append-heavy files is cached and
-            // can lag or stall, which caused subagents to vanish prematurely
-            // while still working. Each line carries a `timestamp` field, so
-            // the last line's timestamp is the authoritative "last activity".
-            var lastActivity = ReadLastActivityUtc(jsonlPath);
-            if (lastActivity is null || (now - lastActivity.Value).TotalSeconds > ActiveWindowSeconds)
-                continue; // stale — subagent already ended (or no parseable line)
-
             var agentId = ExtractAgentId(Path.GetFileName(jsonlPath));
+
+            // Fallback activity check FIRST: if the file's last line timestamp
+            // is stale beyond the window, the subagent ended before the tailer
+            // could observe a turn-end (e.g. CC-Pulse launched after the
+            // subagent finished). Deactivate any lingering tail and skip it so
+            // it is not reported active. This avoids tailing dead files.
+            var lastActivity = ReadLastActivityUtc(jsonlPath);
+            if (lastActivity is null ||
+                (now - lastActivity.Value).TotalSeconds > FallbackStaleSeconds)
+            {
+                _tailer.DeactivateSubagent(agentId);
+                continue;
+            }
+
             var meta = ReadMeta(subagentsDir, agentId);
+
+            // Activate the tailer for this active subagent file. The tailer is
+            // idempotent — re-activating an already-tailed path is a no-op.
+            // On first activation the offset is set to EOF, so only NEW
+            // appends drive state changes; the fallback mtime check above
+            // covers the gap before the first new line arrives.
+            _tailer.ActivateSubagent(agentId, jsonlPath);
+
             var info = new SubagentInfo
             {
                 AgentId = agentId,
                 AgentType = meta.AgentType,
                 Description = meta.Description,
                 DisplayName = ChooseDisplayName(meta.AgentType, meta.Description),
+                LastActivityUtc = lastActivity.Value,
             };
             active.Add(info);
         }
 
         _sessionManager.UpdateSubagents(sessionId, active);
+    }
+
+    /// <summary>
+    /// Handler for <see cref="SubagentTailer.StateChanged"/>: forward the
+    /// fine-grained state to the SessionManager so the matching
+    /// <see cref="SubagentInfo"/> is updated and the UI refreshes.
+    /// </summary>
+    private void OnSubagentStateChanged(object? sender, SubagentStateEventArgs e)
+    {
+        _sessionManager.UpdateSubagentState(e.AgentId, e.State, e.ActiveToolName, e.Source);
     }
 
     /// <summary>
@@ -203,15 +247,11 @@ public class SubagentWatcher : IDisposable
 
     /// <summary>
     /// Read the timestamp of the last complete line of an agent jsonl file,
-    /// returned as UTC. Each line is a JSON object with a top-level
-    /// <c>timestamp</c> field (ISO 8601, UTC, e.g. "2026-07-31T09:57:23.479Z").
-    /// This is far more reliable than <see cref="File.GetLastWriteTime"/>, whose
-    /// mtime on Windows is cached for append-heavy writes and can lag or stall.
-    ///
-    /// A single jsonl line can be tens of KB (assistant messages with large
-    /// attachments), so this scans backward from the end of the file in chunks
-    /// until it locates the last newline that terminates a complete line, then
-    /// parses that line. Returns null if no parseable timestamped line is found.
+    /// returned as UTC. Used only for the fallback stale-window check; the
+    /// authoritative state comes from <see cref="SubagentTailer"/>. Each line
+    /// carries a top-level <c>timestamp</c> field (ISO 8601, UTC). Scans
+    /// backward from the end of the file in chunks to locate the last
+    /// complete line. Returns null if no parseable timestamped line is found.
     /// </summary>
     private static DateTime? ReadLastActivityUtc(string jsonlPath)
     {
@@ -222,11 +262,6 @@ public class SubagentWatcher : IDisposable
             var length = fs.Length;
             if (length == 0) return null;
 
-            // Scan backward in chunks to find the start of the last complete
-            // line. The file ends with '\n' (after the last line), so the last
-            // complete line is the text between the second-to-last '\n' and the
-            // final '\n'. We collect bytes from the end until we have seen at
-            // least one '\n' that is not the very last byte.
             const int chunkSize = 8192;
             byte[] collected = Array.Empty<byte>();
             var pos = length;
@@ -241,7 +276,6 @@ public class SubagentWatcher : IDisposable
                 var read = fs.Read(chunk, 0, readLen);
                 if (read == 0) break;
 
-                // Prepend this chunk to what we've collected from the tail.
                 if (collected.Length > 0)
                 {
                     var combined = new byte[read + collected.Length];
@@ -254,8 +288,6 @@ public class SubagentWatcher : IDisposable
                     collected = chunk;
                 }
 
-                // Count newlines in the freshly read region (the first `read`
-                // bytes of `collected`). Stop once we have a complete line.
                 for (int i = read - 1; i >= 0; i--)
                 {
                     if (chunk[i] == '\n')
@@ -263,18 +295,14 @@ public class SubagentWatcher : IDisposable
                         newlineCount++;
                         if (newlineCount >= 2)
                         {
-                            // The byte after this '\n' begins the last complete line.
                             return ParseTimestampFromTail(collected, i + 1);
                         }
                     }
                 }
 
-                // Safety cap: never read more than ~256 KB looking for a line.
                 if (collected.Length > 256 * 1024) break;
             }
 
-            // Reached the start of file with fewer than 2 newlines: the whole
-            // file is one line (or the first line is the last complete line).
             return ParseTimestampFromTail(collected, 0);
         }
         catch
@@ -291,7 +319,6 @@ public class SubagentWatcher : IDisposable
     /// </summary>
     private static DateTime? ParseTimestampFromTail(byte[] buffer, int start)
     {
-        // Find the end of the line starting at `start`.
         int end = start;
         while (end < buffer.Length && buffer[end] != '\n')
             end++;
@@ -358,15 +385,12 @@ public class SubagentWatcher : IDisposable
         if (!string.IsNullOrEmpty(agentType) && !builtIn.Contains(agentType))
             return agentType;
 
-        // Built-in or unknown type — prefer the description summary.
         if (!string.IsNullOrWhiteSpace(description))
         {
             var summary = description.Trim();
-            // Keep the row compact; truncate long descriptions.
             return summary.Length <= 40 ? summary : summary[..37] + "…";
         }
 
-        // Nothing to show — fall back to the type, or a generic label.
         return string.IsNullOrEmpty(agentType) ? "subagent" : agentType;
     }
 
@@ -376,6 +400,8 @@ public class SubagentWatcher : IDisposable
         _disposed = true;
         _pollTimer?.Dispose();
         _pollTimer = null;
+        _tailer.StateChanged -= OnSubagentStateChanged;
+        _tailer.Dispose();
         lock (_lock)
         {
             _sessionProjects.Clear();

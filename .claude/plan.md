@@ -1,108 +1,79 @@
-# 修复 subagent：结束后立即消失 + 串行场景正确显示
+# 修复 subagent 终态推导缺口 + 行常驻 UI
 
-## 诊断结论（Tavily 搜索 + 磁盘实证）
+## 根因
 
-**监听策略是对的。** Claude Code 确实把每个 subagent 写成
-`~/.claude/projects/<encodedProj>/<sessionId>/subagents/agent-<id>.jsonl`，
-正是 `SubagentWatcher` 在轮询的路径。磁盘实证：一个 session 目录里有 5 个并发
-`agent-*.jsonl`（ffcs-librarian/architect/engineer×2），`agentType`/`description` 各异。
-`workflows/` 子目录在所有项目里一个都没有（只 Workflow 工具场景才有）。第三方项目
-`atc-claude-kanban` 监听的也是同一路径。所以"只显示一个"和"延迟消失"都不是监听策略错。
+两个问题同源：
 
-## 真正根因
+1. **终态推导缺口**：`SubagentTailer.DeriveState` 依赖 `system.stop_hook_summary` 推导 `Completed`/`Failed`，但实测 Claude Code **不在 subagent 转录里写任何 `system` 条目**（转录只有 assistant/user/attachment）。所以 `_turnEnded` 永不置 true，subagent 状态永久卡在 `Thinking`。
 
-### 根因A：结束后过一段时间才消失（用户要"立即消失"）
+2. **行常驻 UI**：XAML subagent 行可见性绑定 `HasSubagentActivity`（锁存字段，置 true 后永不回 false）。设计意图是"行 persists 显示 idle 过渡"，但配合问题 1，终态推不出 → 行无法干净消失 → 集合被 watcher fallback 清空后，`SubagentStatusText` 返回"subagent 空闲" → 绿色空闲行常驻。
 
-`SubagentStop` hook **从未被配置进用户的 `~/.claude/settings.json`**（实测只有
-SessionStart/PreToolUse/PostToolUse/UserPromptSubmit/Stop/SessionEnd，没有 SubagentStop）。
-当前运行的 ClaudeMonitor.exe 构建早于 `UsesMissingSubagentStop` 迁移逻辑，所以 hook 没补上。
-
-即便 SubagentStop 被配置，当前链路也无法立即移除 subagent 行：
-1. `HookRunner.Run` 只解析 `session_id`/`cwd`/`tool_name`，**不解析 `agent_id`**。
-2. `HookServer` 的 `subagent-stop` 路由调 `SetSubagentActive(sessionId, false)`，
-   只清 `SubagentActive` **标量**，**不清 `Subagents` 集合**里的具体行。
-3. `SubagentActive` getter 是 `_subagentActive || Subagents.Count > 0`，标量清了但
-   集合里行还在 → `Count > 0` → 行仍可见。
-4. 唯一移除行的途径：watcher 的 45s 老化窗口。subagent 结束后 jsonl 不再追加，
-   最后一行 timestamp 逐渐老化，45s 后才被 watcher 判为 stale → 行才消失。
-
-**所以"过一段时间才消失"= 45s 老化延迟，不是 hook 驱动的即时清除。**
-
-### 根因B：串行场景"只显示一个"
-
-用户确认是**串行**（一个跑完再跑下一个）。串行时序：
-- A 跑 → 集合 {A}，显示 1 行 ✓
-- A 结束 → 无 SubagentStop hook → 集合仍 {A}（45s 内 watcher 仍判 active）→ 仍显示 A
-- B 启动 → watcher 轮询 → active={A,B}（A 还在 45s 窗口）→ 集合应 {A,B} → 应显示 2 行
-
-用户只看到 1 行，说明 A 在 B 启动前已老化出窗口（A 结束后超过 45s 才启动 B），
-此时集合={B}，1 行——这是 45s 残留的副作用：A 残留期间显示的是"已结束的 A"，
-用户误以为"只显示一个"。**根因B 是根因A 的衍生**：修好"立即消失"后，串行场景
-自然变成"A 结束立即消失 → B 启动立即出现"，不再有残留混淆。
+数据约束（已验证）：
+- subagent 转录无 `system`/`stop_hook_summary`，`parentUuid`/`sourceToolAssistantUUID` 均为 None → 无法从主会话 tool_result 精确关联 subagent 终态
+- 主会话用 `Agent` 工具派生（非 `Task`），tool_use id (`call_xxx`) 与 subagent agentId (`ad387fb...`) 无映射
+- 唯一可靠终态信号：**subagent 转录长时间无新条目 + 无 unpaired tool_use**
 
 ## 修复方案
 
-核心思路：**让 SubagentStop hook 真正生效，并按 agent_id 精确移除集合行**，
-subagent 结束即从 UI 消失，不再依赖 45s 老化。watcher 退化为兜底（hook 漏发时清理）。
+### 改动 1：SubagentTailer — 时间-based 终态兜底
 
-### 改动1：HookRunner 解析 agent_id
+在 `DeriveState` 中，`Thinking` 分支前增加一条**静默超时推导**：若最后一次转录活动距今超过阈值、且无 unpaired tool_use、且非 WaitingApi 条件，则推导为 `Completed`。
 
-`ClaudeMonitor/Services/HookRunner.cs` — `Run` 方法解析 stdin JSON 时增加
-`agent_id`（SubagentStop/SubagentStart payload 字段，官方文档确认存在），放入 payload。
-payload 字段名用 `agentId`。
+`SubagentTailer.cs`：
+- 新增常量 `IdleToCompletedSeconds = 20`（与 watcher `FallbackStaleSeconds` 对齐）
+- `SubagentFileTail` 已有 `_lastEntryUtc`（每条条目更新），用它判断静默时长
+- `DeriveState` 在 `Thinking` 分支前插入：
+  ```
+  if (_lastAssistantUtc is not null && _unpairedToolUseIds.Count == 0
+      && (nowUtc - _lastEntryUtc).TotalSeconds > IdleToCompletedSeconds)
+  {
+      return SubagentState.Completed;
+  }
+  ```
+  - 注意：`_lastEntryUtc` 在 `ProcessLine` 里对所有解析成功的条目更新，是"最后活动"的准确度量
+  - 阈值 20s：subagent 思考间隙通常 <10s，20s 无新条目基本可判定结束；与 watcher fallback 一致，避免 tailer 与 watcher 打架
+- `Failed` 无法从转录内容可靠推导（无 error 信号），保留 `_turnEndedWithError` 路径作为未来扩展，本次不补
 
-### 改动2：HookServer 的 subagent-stop 路由按 agent_id 移除行
+### 改动 2：SessionManager — 终态后延迟移除行
 
-`ClaudeMonitor/Services/HookServer.cs`：
-- `HandleRoute` 的 `subagent-stop` case：从 payload 取 `agentId`，调新方法
-  `_sessionManager.RemoveSubagent(sessionId, agentId)` 精确移除该行。
-- 若 payload 无 agentId（兜底），退化为 `SetSubagentActive(false)`（清标量），
-  让 watcher 45s 老化兜底。
-- `ParsePayload` 已是 `Dictionary<string,string>`，只需在 `HandleRouteAsync` 里多取
-  `agentId` 并传入 `HandleRoute`。
+`UpdateSubagentState` 在设置 `State = Completed/Failed` 后，启动一个 per-agent 一次性定时器（3s），到时调用 `RemoveSubagent(sessionId, agentId)` 移除行。
 
-### 改动3：SessionManager 新增 RemoveSubagent
+`SessionManager.cs`：
+- 新增 `ConcurrentDictionary<string, System.Threading.Timer> _subagentRemovalTimers`（key = agentId）
+- `UpdateSubagentState` 中，当 `state` 是 `Completed` 或 `Failed` 时：
+  ```
+  ScheduleSubagentRemoval(sessionId, agentId, TimeSpan.FromSeconds(3));
+  ```
+- 新增 `ScheduleSubagentRemoval`：创建一次性 Timer，回调里 `RemoveSubagent(sessionId, agentId)` 并从字典移除/释放 timer。若已存在同 agentId 的 timer，先释放旧的（防重复）
+- `RemoveSubagent` 已有的清理逻辑（移除行、清 `_subagentToSession`、`DeactivateSubagent`、`SubagentActive=false`）复用，无需改
+- 在 `RemoveSubagent` 和 session 移除路径里，额外清理 `_subagentRemovalTimers` 中该 agentId 的 timer（避免移除后 timer 仍触发）
 
-`ClaudeMonitor/Services/SessionManager.cs`：
-- 新增 `public void RemoveSubagent(string sessionId, string agentId)`：
-  在 `SubagentsLock` 下按 `AgentId` 移除该行；若移除后集合空，清 `SubagentActive`
-  标量 + `StopSubagentTimer`；raise `StatusChanged`(SubagentChanged=true) +
-  `SessionsChanged`。`CollectionChanged` 会自动 re-notify `SubagentActive`/可见性。
-- 保留 `SetSubagentActive`（hook 的 SubagentStart 仍用标量做即时点亮）。
+### 改动 3：SessionInfo — `HasSubagentActivity` 在集合清空时回 false
 
-### 改动4：确保 SubagentStop hook 被配置
+让锁存可在"所有 subagent 结束"时解除，使行随终态移除而消失。
 
-`HooksConfig` 已含 SubagentStop（line 67），`UsesMissingSubagentStop` 迁移检测也在。
-问题是用户当前构建旧、没跑过迁移。**修复后重新构建 + 运行一次 ClaudeMonitor.exe**
-会触发 `EnsureHooksConfigured` → 检测到缺 SubagentStop → Remove + Configure 重配。
-无需改 HookConfigurator 代码，只需重建。**但要在 plan 里明确这一步**。
+`SessionInfo.cs`：
+- `HasSubagentActivity` 的 setter 改为允许回 false（移除 `private set` 的隐式约束，setter 本就是 `SetField`，已支持）
+- 在 `Subagents` 集合变化的回调里（`NotifyCollectionChanged` 或现有 hook），当 `Subagents.Count == 0` 时设 `HasSubagentActivity = false`
+- 需确认 `Subagents` 集合变化的监听点。当前 `SessionInfo` 构造里对 `Subagents.CollectionChanged` 有订阅（见 diff 中 line 518 附近的 `HasSubagentActivity = true`）。在该回调里增加：`if (Subagents.Count == 0) HasSubagentActivity = false`
+- 保留"首次检测到 subagent 时置 true"的逻辑不变
 
-### 改动5：watcher 窗口缩短为兜底
+### 改动 4：日志
 
-`ClaudeMonitor/Services/SubagentWatcher.cs`：
-- `ActiveWindowSeconds` 45 → **20**。hook 现在即时移除行，watcher 只兜底 hook 漏发
-  （SubagentStop 在某些模式不 fire，官方文档承认）。20s 足够覆盖 subagent 思考间隙
-  （30s+ 无新行罕见），且 hook 漏发时残留最多 20s 而非 45s。
-- 其余（timestamp 判定、2s 轮询、reconcile by AgentId）不变——已正确。
+`SubagentTailer.RaiseStateIfChanged` 已有日志，终态推导会自动记录 `state=Completed`。`ScheduleSubagentRemoval` 触发移除时，`RemoveSubagent` 路径已有日志覆盖（通过 `SubagentChanged` 事件）。新增一条 `FileLogger.Info` 记录延迟移除调度，便于诊断。
 
 ## 不改动
 
-- XAML / SubagentInfo / SessionInfo 派生属性：绑定正确，`Subagents` 集合 + `SubagentActive`
-  getter 已能驱动 UI；问题在数据源（hook 没清集合），不在 UI。
-- `SubagentStart` hook：不配置。subagent 启动由 watcher 2s 内发现并加行，足够快；
-  hook 的 `SetSubagentActive(true)` 标量点亮已被 watcher reconcile 覆盖，无需 SubagentStart。
-- 120s watchdog：保留作最后兜底。
-
-## 改动文件清单
-
-1. `ClaudeMonitor/Services/HookRunner.cs` — 解析 `agent_id` 入 payload
-2. `ClaudeMonitor/Services/HookServer.cs` — `subagent-stop` 路由取 agentId 调 `RemoveSubagent`
-3. `ClaudeMonitor/Services/SessionManager.cs` — 新增 `RemoveSubagent(sessionId, agentId)`
-4. `ClaudeMonitor/Services/SubagentWatcher.cs` — `ActiveWindowSeconds` 45 → 20
+- `Failed` 推导：无可靠数据源，保留现状（`_turnEndedWithError` 路径），未来若 CC 写入 error 信号再补
+- `_parentToolUseToAgent` / `RegisterParentToolUse`：已删除，不恢复（数据上不可行）
+- watcher fallback stale 窗口：保留，作为 tailer 未激活时的兜底
+- `WaitingApi` 阈值 10s：不变
 
 ## 验证
 
-- `dotnet build` 通过
-- 重新运行 ClaudeMonitor.exe（触发 hook 重配，补上 SubagentStop）
-- 人工：串行跑两个 subagent，确认 A 结束即从 UI 消失（不再残留 45s），B 启动即出现
-- 兜底验证：若 SubagentStop 漏发，watcher 20s 内清理（可接受）
+1. `dotnet build` 0 警告 0 错误
+2. 启动 CC-Pulse，触发 subagent，观察日志：
+   - 状态序列应出现 `... Thinking → Completed`（而非卡在 Thinking）
+   - `Completed` 后约 3s 出现行移除（`SubagentChanged` 事件）
+3. UI：subagent 行经历 `思考中…(红) → 完成(绿，约3s) → 消失`，主 agent 恢复 Busy/Idle
+4. 确认无"空闲"行常驻

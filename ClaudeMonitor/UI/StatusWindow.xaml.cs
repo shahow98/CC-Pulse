@@ -287,26 +287,6 @@ public class MainStatusToTextConverter : IValueConverter
     }
 }
 
-/// <summary>
-/// Converts the SubagentWorking flag (bool) to a labeled text string for the
-/// single subagent status row: "subagent  Working…" while any subagent is
-/// running, "subagent  Idle" once all subagents have finished.
-/// </summary>
-public class SubagentStatusToTextConverter : IValueConverter
-{
-    public object Convert(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
-    {
-        if (value is bool working && working)
-            return Lang.Get("StatusSubagentBusy");
-        return Lang.Get("StatusSubagentIdle");
-    }
-
-    public object ConvertBack(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
-    {
-        throw new NotImplementedException();
-    }
-}
-
 /// <summary>Converts a bool to Visibility (true → Visible, false → Collapsed).</summary>
 public class BooleanToVisibilityConverter : IValueConverter
 {

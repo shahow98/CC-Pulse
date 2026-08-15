@@ -19,7 +19,6 @@
         <ui:StatusToColorConverter x:Key="StatusToColorConverter" />
         <ui:StatusToTextConverter x:Key="StatusToTextConverter" />
         <ui:MainStatusToTextConverter x:Key="MainStatusToTextConverter" />
-        <ui:SubagentStatusToTextConverter x:Key="SubagentStatusToTextConverter" />
         <ui:BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
 
         <!-- Drop shadow border style -->
@@ -66,11 +65,13 @@
                                VerticalAlignment="Center" />
                 </Grid>
 
-                <!-- Single subagent status row (two states). Hidden until the
+                <!-- Single subagent status row (fine-grained). Hidden until the
                      session has spawned at least one subagent (HasSubagentActivity
-                     latches on first detection), then always visible: red
-                     "Working…" while any subagent is running, green "Idle" once
-                     all subagents have finished. -->
+                     latches on first detection), then always visible: red while
+                     any subagent is working (showing the active state — thinking,
+                     running: <tool>, waiting for API…), green once all subagents
+                     have reached a terminal state (done/failed) before the row is
+                     removed by SubagentStop/watcher. -->
                 <Grid Margin="0,1,0,0"
                       Visibility="{Binding HasSubagentActivity, Converter={StaticResource BooleanToVisibilityConverter}}">
                     <Grid.ColumnDefinitions>
@@ -86,7 +87,7 @@
                              Margin="0,0,4,0" />
 
                     <TextBlock Grid.Column="1"
-                               Text="{Binding SubagentWorking, Converter={StaticResource SubagentStatusToTextConverter}}"
+                               Text="{Binding SubagentStatusText}"
                                Foreground="{Binding SubagentWorking, Converter={StaticResource StatusToColorConverter}}"
                                FontSize="11"
                                VerticalAlignment="Center" />
