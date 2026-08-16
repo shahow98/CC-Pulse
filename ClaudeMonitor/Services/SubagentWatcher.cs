@@ -158,14 +158,28 @@ public class SubagentWatcher : IDisposable
         {
             var agentId = ExtractAgentId(Path.GetFileName(jsonlPath));
 
-            // Fallback activity check FIRST: if the file's last line timestamp
-            // is stale beyond the window, the subagent ended before the tailer
+            // Fallback activity check: if the file's last line timestamp is
+            // stale beyond the window, the subagent ended before the tailer
             // could observe a turn-end (e.g. CC-Pulse launched after the
             // subagent finished). Deactivate any lingering tail and skip it so
             // it is not reported active. This avoids tailing dead files.
+            //
+            // BUT this only applies when the tailer is NOT already tailing this
+            // agent. Once the tailer has attached, it is the authoritative state
+            // source (§5.2) and must be allowed to derive Completed/Failed on
+            // its own 40s silence threshold. Letting this 20s fallback preempt
+            // the tailer would Dispose the tail before it ever derives a
+            // terminal state — so a subagent paused on a permission approval
+            // (file legitimately silent > 20s while the user decides) would
+            // have its tail killed, then re-activated as Pending when it
+            // resumes, producing the "disappear → re-spawning" flicker. The
+            // tailer's terminal memory + the escape hatch below handle the
+            // false-terminal case; this fallback is only for the
+            // never-attached (already-dead-before-launch) case.
             var lastActivity = ReadLastActivityUtc(jsonlPath);
-            if (lastActivity is null ||
-                (now - lastActivity.Value).TotalSeconds > FallbackStaleSeconds)
+            if (!_tailer.IsTailing(agentId) &&
+                (lastActivity is null ||
+                 (now - lastActivity.Value).TotalSeconds > FallbackStaleSeconds))
             {
                 _tailer.DeactivateSubagent(agentId);
                 continue;
@@ -179,28 +193,58 @@ public class SubagentWatcher : IDisposable
             // timestamp and re-activates the tail + re-adds the row as Pending
             // → "disappear → re-spawning" flicker.
             //
-            // Escape hatch: if the jsonl grew PAST the terminal verdict (a new
-            // line was written after termAt), the subagent was still running —
-            // the verdict was false. Clear the memory and let the normal
-            // activation path run so the row re-appears and the tail re-derives
-            // state from the new line (not stuck on Pending).
+            // Escape hatch (guess verdicts only): if the jsonl grew PAST a
+            // guess terminal verdict (a new line was written after termAt), the
+            // subagent was still running — the verdict was false. Clear the
+            // memory and let the normal activation path run so the row
+            // re-appears and the tail re-derives state from the new line (not
+            // stuck on Pending). Authoritative verdicts (task-notification /
+            // agents_killed) are NEVER recovered — the subagent is truly done,
+            // and a later jsonl growth is a new invocation, not a recovery.
+            //
+            // Content guard (double insurance): even for a guess verdict, do
+            // not revive if the new line that grew the file is a terminating
+            // user message ("[Request interrupted by user]") — that is a real
+            // end, not a recovery. Handles the edge case where the
+            // agents_killed signal is lost or lags behind the subagent
+            // transcript write.
             if (_tailer.IsTerminal(agentId))
             {
+                if (_tailer.IsAuthoritativeTerminal(agentId))
+                {
+                    // Authoritative terminal — never revive. Deactivate any
+                    // lingering tail and keep the row gone.
+                    _tailer.DeactivateSubagent(agentId);
+                    continue;
+                }
+
+                bool revived = false;
                 if (lastActivity is not null &&
                     _tailer.TryGetTerminalAt(agentId, out var termAt) &&
                     lastActivity.Value > termAt)
                 {
-                    // File grew after the terminal verdict → false terminal.
-                    _tailer.ClearTerminal(agentId);
-                    FileLogger.Info(
-                        $"subagent terminal override (file grew) agent={agentId} " +
-                        $"termAt={termAt:o} lastActivity={lastActivity.Value:o}");
+                    // File grew after the guess verdict. Check the new line's
+                    // content before reviving: an interrupt line is a real end.
+                    if (!IsInterruptLine(jsonlPath, termAt))
+                    {
+                        _tailer.ClearTerminal(agentId);
+                        revived = true;
+                        FileLogger.Info(
+                            $"subagent terminal override (file grew) agent={agentId} " +
+                            $"termAt={termAt:o} lastActivity={lastActivity.Value:o}");
+                    }
+                    else
+                    {
+                        FileLogger.Info(
+                            $"subagent terminal kept (interrupt line) agent={agentId} " +
+                            $"termAt={termAt:o} lastActivity={lastActivity.Value:o}");
+                    }
                 }
-                else
+
+                if (!revived)
                 {
-                    // True terminal, or file has not grown past the verdict →
-                    // keep the row gone. Deactivate any lingering tail (the
-                    // row-removal path may have already done so) and skip.
+                    // True terminal, or file has not grown past the verdict, or
+                    // the new line was an interrupt → keep the row gone.
                     _tailer.DeactivateSubagent(agentId);
                     continue;
                 }
@@ -221,7 +265,7 @@ public class SubagentWatcher : IDisposable
                 AgentType = meta.AgentType,
                 Description = meta.Description,
                 DisplayName = ChooseDisplayName(meta.AgentType, meta.Description),
-                LastActivityUtc = lastActivity.Value,
+                LastActivityUtc = lastActivity ?? DateTime.UtcNow,
             };
             active.Add(info);
         }
@@ -278,6 +322,73 @@ public class SubagentWatcher : IDisposable
         if (fileName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
             fileName = fileName[..^suffix.Length];
         return fileName;
+    }
+
+    /// <summary>
+    /// Whether the first complete jsonl line written after
+    /// <paramref name="afterUtc"/> is a terminating user-interrupt message
+    /// (<c>[Request interrupted by user]</c>). Used by the escape hatch's
+    /// content guard: a guess terminal verdict should NOT be revived when the
+    /// new line that grew the file is an interrupt, because that is a real end,
+    /// not a recovery. Reads forward from a small window near the file's end
+    /// and inspects only the lines whose timestamp is later than
+    /// <paramref name="afterUtc"/>. Returns false if no such line is found or
+    /// it is not an interrupt.
+    /// </summary>
+    private static bool IsInterruptLine(string jsonlPath, DateTime afterUtc)
+    {
+        try
+        {
+            using var fs = new FileStream(jsonlPath, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            if (fs.Length == 0) return false;
+
+            // Scan the whole file is wasteful for large transcripts, but
+            // subagent files are small (a few hundred lines at most). Read all
+            // text and inspect lines whose timestamp exceeds afterUtc.
+            fs.Seek(0, SeekOrigin.Begin);
+            using var sr = new StreamReader(fs, Encoding.UTF8);
+            string? line;
+            while ((line = sr.ReadLine()) is not null)
+            {
+                if (string.IsNullOrWhiteSpace(line) || line[0] != '{') continue;
+                try
+                {
+                    using var doc = JsonDocument.Parse(line);
+                    var root = doc.RootElement;
+                    if (!root.TryGetProperty("timestamp", out var tsProp) ||
+                        tsProp.ValueKind != JsonValueKind.String) continue;
+                    if (!DateTime.TryParse(tsProp.GetString(),
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.AssumeUniversal
+                        | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                        out var dt))
+                        continue;
+                    if (dt.ToUniversalTime() <= afterUtc) continue;
+
+                    // First line after the verdict. A user entry whose content
+                    // is the interrupt sentinel string → real end.
+                    if (!root.TryGetProperty("type", out var tProp) ||
+                        tProp.GetString() != "user") return false;
+                    if (!root.TryGetProperty("message", out var msg) ||
+                        msg.ValueKind != JsonValueKind.Object) return false;
+                    if (!msg.TryGetProperty("content", out var content) ||
+                        content.ValueKind != JsonValueKind.String) return false;
+                    return content.GetString()
+                        ?.Contains("[Request interrupted by user]",
+                            StringComparison.Ordinal) == true;
+                }
+                catch (JsonException)
+                {
+                    continue;
+                }
+            }
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>

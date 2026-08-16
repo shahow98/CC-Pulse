@@ -66,38 +66,41 @@ public class SubagentTailer : IDisposable
     /// tool_use, and no new line has arrived for this long, we infer the
     /// subagent has finished and derive <see cref="SubagentState.Completed"/>.
     ///
-    /// <para>40s covers the long think/act gaps observed in practice (a 32s
-    /// gap was seen to trip the previous 20s threshold and produce a false
-    /// terminal). A false terminal is no longer fatal — the terminal-memory +
-    /// file-grew escape hatch in <see cref="SubagentWatcher"/> prevents the
-    /// "disappear → re-spawn" flicker — but raising the threshold reduces how
-    /// often a still-running subagent's row briefly disappears before the
-    /// escape hatch re-adds it. The watcher's <c>FallbackStaleSeconds</c>
-    /// stays at 20s for the launch-mid-subagent fallback; the two thresholds
-    /// no longer need to match because the terminal memory, not the stale
-    /// window, is now what prevents re-activation.</para>
+    /// <para>120s covers the long think/summary-generation gaps observed in
+    /// practice (a 99.8s gap was seen while a user hesitated over a permission
+    /// approval; a 221s gap occurred while a subagent generated a long summary).
+    /// A silence-derived terminal is a <b>guess</b> (see
+    /// <see cref="TerminalVerdict.IsAuthoritative"/>) — the escape hatch in
+    /// <see cref="SubagentWatcher"/> recovers a false guess when the jsonl
+    /// grows past the verdict. Authoritative terminals (task-notification /
+    /// agents_killed from the main transcript) are never recovered, so raising
+    /// this threshold only reduces how often a still-running subagent's row
+    /// briefly disappears before the escape hatch re-adds it.</para>
     /// </summary>
-    private const int IdleToCompletedSeconds = 40;
+    private const int IdleToCompletedSeconds = 120;
 
     private readonly ConcurrentDictionary<string, SubagentFileTail> _tails = new();
 
     /// <summary>
     /// Terminal-state memory: agent ids the tailer has already derived into
     /// <see cref="SubagentState.Completed"/> or <see cref="SubagentState.Failed"/>,
-    /// mapped to the UTC moment that derivation happened. Independent of the
-    /// tail lifecycle — <see cref="DeactivateSubagent"/> does NOT clear an
-    /// entry, so the watcher can skip re-activating a subagent whose row was
-    /// removed on a (possibly false) terminal verdict.
+    /// mapped to the verdict (UTC moment + whether it is authoritative).
+    /// Independent of the tail lifecycle — <see cref="DeactivateSubagent"/> does
+    /// NOT clear an entry, so the watcher can skip re-activating a subagent
+    /// whose row was removed on a (possibly false) terminal verdict.
     ///
-    /// <para><b>Escape hatch:</b> a false terminal (a long think/act gap that
-    /// crossed <see cref="IdleToCompletedSeconds"/> while the subagent was
-    /// still running) is recovered by the watcher: if the subagent's jsonl
-    /// grows past <c>termAt</c> (a new line is written after the terminal
-    /// verdict), the watcher calls <see cref="ClearTerminal"/> and re-activates
-    /// the tail. Cleared wholesale by <see cref="ClearAllTerminal"/> on session
-    /// removal to avoid cross-session leakage.</para>
+    /// <para><b>Authoritative vs guess:</b> a verdict set by
+    /// <see cref="MarkAuthoritativeTerminal"/> (task-notification /
+    /// agents_killed from the main transcript) is authoritative and is NEVER
+    /// recovered — the subagent is truly done. A verdict set by the
+    /// silence-to-terminal path (<see cref="IdleToCompletedSeconds"/>) is a
+    /// guess: the escape hatch in <see cref="SubagentWatcher"/> recovers it
+    /// when the jsonl grows past <c>termAt</c> (a new line was written after
+    /// the verdict → the subagent was still running). Cleared wholesale by
+    /// <see cref="ClearAllTerminal"/> on session removal to avoid cross-session
+    /// leakage.</para>
     /// </summary>
-    private readonly ConcurrentDictionary<string, DateTime> _terminalAt = new();
+    private readonly ConcurrentDictionary<string, TerminalVerdict> _terminalAt = new();
 
     private System.Threading.Timer? _pollTimer;
     private bool _disposed;
@@ -168,20 +171,58 @@ public class SubagentTailer : IDisposable
         => _terminalAt.ContainsKey(agentId);
 
     /// <summary>
+    /// Whether the terminal verdict for this agent is <b>authoritative</b>
+    /// (set by <see cref="MarkAuthoritativeTerminal"/> via a task-notification
+    /// or agents_killed signal from the main transcript). Authoritative
+    /// verdicts are never recovered by the escape hatch — the subagent is
+    /// truly done. Returns false if the agent has no terminal verdict or the
+    /// verdict is a silence-derived guess.
+    /// </summary>
+    public bool IsAuthoritativeTerminal(string agentId)
+        => _terminalAt.TryGetValue(agentId, out var v) && v.IsAuthoritative;
+
+    /// <summary>
     /// Try to get the UTC moment the terminal verdict was recorded for this
     /// agent. Returns false if the agent is not in the terminal memory. Used
     /// by the watcher's escape hatch: if the subagent's jsonl last-line
     /// timestamp is later than this moment, the file grew after the verdict →
-    /// false terminal → clear and re-activate.
+    /// false terminal → clear and re-activate (only for guess verdicts;
+    /// authoritative verdicts are never cleared this way).
     /// </summary>
     public bool TryGetTerminalAt(string agentId, out DateTime terminalAt)
-        => _terminalAt.TryGetValue(agentId, out terminalAt);
+    {
+        if (_terminalAt.TryGetValue(agentId, out var v))
+        {
+            terminalAt = v.At;
+            return true;
+        }
+        terminalAt = default;
+        return false;
+    }
+
+    /// <summary>
+    /// Record an <b>authoritative</b> terminal verdict for a subagent, driven
+    /// by a task-notification or agents_killed signal observed in the main
+    /// transcript (not by the subagent's own silence). Independent of the tail
+    /// lifecycle — must be callable even after the row was removed on a prior
+    /// (guess) terminal verdict, because the authoritative signal can arrive
+    /// after the row is gone (timing race: guess terminal → row removal →
+    /// interrupt signal). An authoritative verdict overrides any prior guess
+    /// verdict for the same agent and is never recovered by the escape hatch.
+    /// </summary>
+    public void MarkAuthoritativeTerminal(string agentId, DateTime atUtc)
+    {
+        _terminalAt[agentId] = new TerminalVerdict(atUtc, IsAuthoritative: true);
+        FileLogger.Info(
+            $"subagent authoritative terminal agent={agentId} at={atUtc:o}");
+    }
 
     /// <summary>
     /// Clear the terminal memory for one agent (the escape hatch). Called by
-    /// the watcher when it detects the subagent's jsonl grew past the terminal
-    /// verdict — the subagent was still running, so the verdict was false and
-    /// the agent is allowed to be re-activated.
+    /// the watcher when it detects the subagent's jsonl grew past a
+    /// <b>guess</b> terminal verdict — the subagent was still running, so the
+    /// verdict was false and the agent is allowed to be re-activated. Must NOT
+    /// be called for authoritative verdicts (those are never false).
     /// </summary>
     public void ClearTerminal(string agentId)
         => _terminalAt.TryRemove(agentId, out _);
@@ -200,6 +241,28 @@ public class SubagentTailer : IDisposable
     }
 
     /// <summary>
+    /// Promote any <b>guess</b> terminal verdicts for the given agents to
+    /// <b>authoritative</b>, preserving the original verdict moment. Called by
+    /// SessionManager.OnSubagentsKilled for every subagent a session has ever
+    /// seen: an <c>agents_killed</c> interrupt ends all running subagents, so
+    /// any prior silence-derived (guess) verdict for them is confirmed true
+    /// and must no longer be recoverable by the escape hatch. Agents with no
+    /// verdict, or already-authoritative, are left unchanged.
+    /// </summary>
+    public void PromoteGuessTerminalsToAuthoritative(IEnumerable<string> agentIds)
+    {
+        foreach (var id in agentIds)
+        {
+            if (_terminalAt.TryGetValue(id, out var v) && !v.IsAuthoritative)
+            {
+                _terminalAt[id] = new TerminalVerdict(v.At, IsAuthoritative: true);
+                FileLogger.Info(
+                    $"subagent terminal promoted to authoritative agent={id} at={v.At:o}");
+            }
+        }
+    }
+
+    /// <summary>
     /// Snapshot of all currently-tailed subagent agent ids. Used by the
     /// watcher to deactivate tails for subagents that have disappeared.
     /// </summary>
@@ -207,6 +270,17 @@ public class SubagentTailer : IDisposable
     {
         return _tails.Keys.ToArray();
     }
+
+    /// <summary>
+    /// Whether the tailer is currently tailing this agent (i.e. has an active
+    /// <see cref="SubagentFileTail"/> for it). Used by the watcher's fallback
+    /// stale check to avoid preempting an attached tail: once the tailer owns
+    /// an agent, the watcher must not Dispose its tail on the 20s stale
+    /// window — the tailer derives the terminal state itself on the 120s
+    /// silence threshold.
+    /// </summary>
+    public bool IsTailing(string agentId)
+        => _tails.ContainsKey(agentId);
 
     private void PollAll(object? state)
     {
@@ -241,11 +315,18 @@ public class SubagentTailer : IDisposable
         tail.LastReportedToolName = activeToolName;
 
         // Record the terminal verdict so the watcher can skip re-activating
-        // this subagent after its row is removed. The escape hatch (file grew
-        // past this moment) clears it if the verdict turns out to be false.
+        // this subagent after its row is removed. This silence-derived verdict
+        // is a GUESS — the escape hatch (file grew past this moment) clears it
+        // if the verdict turns out to be false. An authoritative verdict
+        // (task-notification / agents_killed) set via MarkAuthoritativeTerminal
+        // overrides this and is never cleared by the escape hatch.
         if (derived == SubagentState.Completed || derived == SubagentState.Failed)
         {
-            _terminalAt[tail.AgentId] = DateTime.UtcNow;
+            // Only record a guess if there is no authoritative verdict already
+            // present (an authoritative verdict arriving first wins and must
+            // not be downgraded to a guess).
+            _terminalAt.TryAdd(tail.AgentId,
+                new TerminalVerdict(DateTime.UtcNow, IsAuthoritative: false));
         }
 
         FileLogger.Info(
@@ -734,3 +815,14 @@ public class SubagentStateEventArgs : EventArgs
     public string ActiveToolName { get; init; } = string.Empty;
     public StateSource Source { get; init; } = StateSource.Transcript;
 }
+
+/// <summary>
+/// A terminal-state verdict for a subagent: the UTC moment it was recorded and
+/// whether it is authoritative. An <b>authoritative</b> verdict is driven by a
+/// task-notification or agents_killed signal in the main transcript (the
+/// subagent is truly done) and is never recovered by the escape hatch. A
+/// <b>guess</b> verdict is derived from subagent-transcript silence
+/// (<see cref="SubagentTailer.IdleToCompletedSeconds"/>) and may be recovered
+/// by the escape hatch when the jsonl grows past <see cref="At"/>.
+/// </summary>
+public readonly record struct TerminalVerdict(DateTime At, bool IsAuthoritative);

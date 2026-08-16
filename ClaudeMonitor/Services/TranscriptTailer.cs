@@ -499,6 +499,30 @@ public class TranscriptTailer : IDisposable
                 return;
             }
 
+            // A subagent's completion is announced in the MAIN transcript as a
+            // user message whose string content is a <task-notification> XML
+            // block: "<task-notification><task-id>{agentId}</task-id>...<status>completed</status>...</task-notification>".
+            // This is NOT a real user message — it must not start a WaitingApi
+            // window. Parse out the agent id and status and route to the
+            // subagent terminal handler (authoritative terminal signal).
+            if (msg.TryGetProperty("content", out var tnContent) &&
+                tnContent.ValueKind == JsonValueKind.String)
+            {
+                var text = tnContent.GetString();
+                if (text is not null &&
+                    text.Contains("<task-notification>", StringComparison.Ordinal))
+                {
+                    var agentId = ExtractXmlTag(text, "task-id") ?? string.Empty;
+                    var status = ExtractXmlTag(text, "status") ?? "completed";
+                    if (!string.IsNullOrEmpty(agentId))
+                    {
+                        _sessionManager.OnSubagentTaskNotification(
+                            _sessionId, agentId, status, atUtc);
+                    }
+                    return;
+                }
+            }
+
             bool hadToolResult = false;
             if (msg.TryGetProperty("content", out var content) &&
                 content.ValueKind == JsonValueKind.Array)
@@ -528,6 +552,24 @@ public class TranscriptTailer : IDisposable
         }
 
         /// <summary>
+        /// Extract the inner text of the first <c>&lt;{tagName}&gt;...&lt;/{tagName}&gt;</c>
+        /// occurrence from <paramref name="text"/>. Used to pull the agent id
+        /// and status out of a <c>&lt;task-notification&gt;</c> block without
+        /// introducing an XML dependency. Returns null if the tag is absent.
+        /// </summary>
+        private static string? ExtractXmlTag(string text, string tagName)
+        {
+            var open = "<" + tagName + ">";
+            var close = "</" + tagName + ">";
+            int start = text.IndexOf(open, StringComparison.Ordinal);
+            if (start < 0) return null;
+            start += open.Length;
+            int end = text.IndexOf(close, start, StringComparison.Ordinal);
+            if (end < 0) return null;
+            return text.Substring(start, end - start);
+        }
+
+        /// <summary>
         /// Extract the UTC timestamp from a transcript entry's top-level
         /// <c>timestamp</c> field. Falls back to <see cref="DateTime.UtcNow"/>
         /// if absent or malformed (same policy as <see cref="ProcessSystem"/>).
@@ -552,13 +594,29 @@ public class TranscriptTailer : IDisposable
         /// authoritative turn-end signal (current Claude Code versions no
         /// longer write a top-level "result" entry). Reporting it lets the
         /// reconciler set Idle authoritatively.
+        ///
+        /// A system entry with subtype "agents_killed" means the user
+        /// interrupted (Ctrl+C) and Claude Code killed the running subagents.
+        /// It is a session-level signal (no agent id) — route it to the
+        /// subagent terminal handler so every still-working subagent on this
+        /// session is driven to Failed with an authoritative terminal verdict.
         /// </summary>
         private void ProcessSystem(JsonElement root)
         {
             if (!root.TryGetProperty("subtype", out var subProp)) return;
-            if (subProp.GetString() != "stop_hook_summary") return;
+            var subtype = subProp.GetString();
 
-            _sessionManager.OnTranscriptTurnEnd(_sessionId, ExtractTimestamp(root));
+            if (subtype == "stop_hook_summary")
+            {
+                _sessionManager.OnTranscriptTurnEnd(_sessionId, ExtractTimestamp(root));
+                return;
+            }
+
+            if (subtype == "agents_killed")
+            {
+                _sessionManager.OnSubagentsKilled(_sessionId, ExtractTimestamp(root));
+                return;
+            }
         }
 
         public void Dispose()

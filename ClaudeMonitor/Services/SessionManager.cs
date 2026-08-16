@@ -73,6 +73,17 @@ public class SessionManager : IDisposable
     private readonly ConcurrentDictionary<string, string> _subagentToSession = new();
 
     /// <summary>
+    /// Per-session set of every subagent agent id ever seen on that session
+    /// (union across the session's lifetime, NOT cleared when a row is
+    /// removed). Used by <see cref="OnSubagentsKilled"/> to promote guess
+    /// terminal verdicts to authoritative for subagents whose rows were
+    /// already removed by a prior guess verdict's removal timer — the
+    /// <c>agents_killed</c> signal is session-level and must cover them too.
+    /// Cleared on <see cref="RemoveSession"/>.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, HashSet<string>> _sessionSubagentIds = new();
+
+    /// <summary>
     /// Filesystem watcher that authoritatively detects subagent activity by
     /// scanning each session's subagents/ directory. May be null when the
     /// SessionManager is used standalone (e.g. CLI). Set by the app at startup.
@@ -782,6 +793,13 @@ public class SessionManager : IDisposable
     {
         if (string.IsNullOrEmpty(agentId) || string.IsNullOrEmpty(sessionId)) return;
         _subagentToSession[agentId] = sessionId;
+        // Also record in the per-session lifetime set so OnSubagentsKilled can
+        // promote guess verdicts for subagents whose rows were already removed.
+        var set = _sessionSubagentIds.GetOrAdd(sessionId, _ => new HashSet<string>(StringComparer.Ordinal));
+        lock (set)
+        {
+            set.Add(agentId);
+        }
     }
 
     /// <summary>
@@ -906,6 +924,20 @@ public class SessionManager : IDisposable
         var hookTracked = session.IsToolHookTracked(toolUseId);
         FileLogger.Info($"transcript tool_use {sessionId}: id={toolUseId} tool={toolName} hookTracked={hookTracked}");
 
+        // The main agent is authoritatively active (transcript tool_use). If a
+        // stale IsWaitingUser flag lingers from a prior Notification (e.g. set
+        // during a subagent run, then the post-subagent summary turn's
+        // PreToolUse hooks were lost so UpdateStatus(Busy) never cleared it),
+        // clear it here so the fine state leaves WaitingUser. Transcript is the
+        // authority; hooks may be lost. Only main-transcript tool_uses reach
+        // here (subagent transcripts go through SubagentTailer), so this only
+        // clears the main agent's flag.
+        if (session.IsWaitingUser)
+        {
+            session.ClearWaitingUser();
+            FileLogger.Info($"transcript tool_use cleared waitingUser {sessionId}");
+        }
+
         // The transcript observing a tool_use confirms the current hook-driven
         // Busy period. This suppresses grace_expired for the rest of the turn:
         // once the hook Busy has been confirmed, a later between-tools gap or
@@ -973,6 +1005,23 @@ public class SessionManager : IDisposable
     {
         if (!_sessions.TryGetValue(sessionId, out var session)) return;
         session.RecordTranscriptAssistantMessage(atUtc);
+
+        // The main agent is authoritatively active (transcript assistant text).
+        // If a stale IsWaitingUser flag lingers from a prior Notification (e.g.
+        // set during a subagent run, then the post-subagent summary turn's
+        // PreToolUse hooks were lost so UpdateStatus(Busy) never cleared it),
+        // clear it here so the fine state leaves WaitingUser. The summary turn
+        // often opens with assistant text BEFORE any tool_use, so this path
+        // matters independently of OnTranscriptToolUse. Transcript is the
+        // authority; hooks may be lost. Only main-transcript assistant messages
+        // reach here (subagent transcripts go through SubagentTailer), so this
+        // only clears the main agent's flag.
+        if (session.IsWaitingUser)
+        {
+            session.ClearWaitingUser();
+            FileLogger.Info($"transcript assistant cleared waitingUser {sessionId}");
+        }
+
         Reconcile(sessionId);
     }
 
@@ -1001,6 +1050,140 @@ public class SessionManager : IDisposable
         session.RecordTranscriptTurnEnd(atUtc);
         FileLogger.Info($"transcript turn_end {sessionId}: at {atUtc:o} hadUnpaired={hadUnpaired}");
         Reconcile(sessionId);
+    }
+
+    /// <summary>
+    /// The main transcript observed a <c>&lt;task-notification&gt;</c> user
+    /// message announcing that subagent <paramref name="agentId"/> finished
+    /// with <paramref name="status"/>. This is the <b>authoritative</b>
+    /// terminal signal for a subagent (far more reliable than the subagent's
+    /// own silence). Drives the subagent to <see cref="SubagentState.Completed"/>
+    /// (or <see cref="SubagentState.Failed"/> for a non-completed status) and
+    /// records an authoritative terminal verdict on the tailer so the escape
+    /// hatch never revives it.
+    ///
+    /// <para>Must mark the authoritative terminal on the tailer FIRST,
+    /// independent of the row lifecycle: the row may already have been removed
+    /// by a prior (guess) terminal verdict's removal timer (timing race: guess
+    /// terminal → row removed → interrupt/task-notification arrives). The
+    /// authoritative verdict prevents the watcher from re-activating the
+    /// subagent even when the row is already gone.</para>
+    ///
+    /// <para>If the row is still present, the normal terminal path runs (show
+    /// Completed briefly, then remove). If the row is already gone, the
+    /// authoritative verdict alone is enough — there is nothing to update.</para>
+    /// </summary>
+    public void OnSubagentTaskNotification(string sessionId, string agentId,
+        string status, DateTime atUtc)
+    {
+        if (string.IsNullOrEmpty(agentId)) return;
+        if (!_sessions.TryGetValue(sessionId, out var session)) return;
+
+        FileLogger.Info(
+            $"subagent task-notification session={sessionId} agent={agentId} " +
+            $"status={status} at={atUtc:o}");
+
+        // 1. Mark the authoritative terminal on the tailer FIRST. This is
+        //    independent of the row lifecycle and must survive even if the row
+        //    was already removed by a guess verdict's removal timer.
+        _subagentWatcher?.Tailer.MarkAuthoritativeTerminal(agentId, atUtc);
+
+        // 2. If the row is still present, drive it to the terminal state via
+        //    the normal path (UpdateSubagentState shows the transition briefly
+        //    then schedules removal). task-notification status is "completed"
+        //    in all observed samples; any other status still means the
+        //    subagent stopped, so map non-completed to Failed conservatively.
+        var state = string.Equals(status, "completed",
+            StringComparison.OrdinalIgnoreCase)
+            ? SubagentState.Completed
+            : SubagentState.Failed;
+
+        // Ensure the association is registered so UpdateSubagentState can route.
+        RegisterSubagentAssociation(agentId, sessionId);
+
+        // Only update if the row exists and is not already terminal (avoid
+        // re-scheduling removal for an already-terminal/removed row).
+        bool rowExists = false;
+        lock (session.SubagentsLock)
+        {
+            for (int i = 0; i < session.Subagents.Count; i++)
+            {
+                if (string.Equals(session.Subagents[i].AgentId, agentId,
+                    StringComparison.Ordinal))
+                {
+                    rowExists = true;
+                    break;
+                }
+            }
+        }
+
+        if (rowExists)
+        {
+            UpdateSubagentState(agentId, state, string.Empty, StateSource.Transcript);
+        }
+        else
+        {
+            // Row already removed (guess verdict beat us to it). The
+            // authoritative verdict recorded above is what matters — it
+            // prevents re-activation. Nothing more to do.
+            FileLogger.Info(
+                $"subagent task-notification agent={agentId}: row already gone, " +
+                $"authoritative verdict recorded only");
+        }
+    }
+
+    /// <summary>
+    /// The main transcript observed an <c>agents_killed</c> system entry — the
+    /// user interrupted (Ctrl+C) and Claude Code killed the running subagents.
+    /// This is a session-level signal (no agent id), so every subagent on this
+    /// session that is still working is driven to <see cref="SubagentState.Failed"/>
+    /// with an authoritative terminal verdict. Subagents that already finished
+    /// (Completed via task-notification) are left alone — they already have an
+    /// authoritative verdict and their rows are gone or going.
+    /// </summary>
+    public void OnSubagentsKilled(string sessionId, DateTime atUtc)
+    {
+        if (!_sessions.TryGetValue(sessionId, out var session)) return;
+
+        FileLogger.Info($"subagent agents_killed session={sessionId} at={atUtc:o}");
+
+        // Snapshot the working subagents under the lock, then act outside the
+        // lock (UpdateSubagentState acquires the lock itself).
+        List<string> workingAgentIds;
+        lock (session.SubagentsLock)
+        {
+            workingAgentIds = new List<string>();
+            for (int i = 0; i < session.Subagents.Count; i++)
+            {
+                if (session.Subagents[i].IsWorking)
+                    workingAgentIds.Add(session.Subagents[i].AgentId);
+            }
+        }
+
+        // 1. Drive every still-working subagent (row present) to Failed with
+        //    an authoritative terminal verdict.
+        foreach (var agentId in workingAgentIds)
+        {
+            // Authoritative terminal FIRST (independent of row lifecycle).
+            _subagentWatcher?.Tailer.MarkAuthoritativeTerminal(agentId, atUtc);
+            // Drive the row to Failed via the normal terminal path.
+            UpdateSubagentState(agentId, SubagentState.Failed,
+                string.Empty, StateSource.Transcript);
+        }
+
+        // 2. Promote guess verdicts to authoritative for subagents whose rows
+        //    were ALREADY removed by a prior guess verdict's removal timer
+        //    (timing race: guess terminal → row removed → interrupt arrives).
+        //    These have no row to drive, but their guess verdict must be
+        //    confirmed so the escape hatch does not revive them when the
+        //    subagent transcript later writes the interrupt line. Uses the
+        //    per-session lifetime set (rows may be gone, but the set remembers).
+        if (_sessionSubagentIds.TryGetValue(sessionId, out var lifetimeSet))
+        {
+            List<string> allIds;
+            lock (lifetimeSet) { allIds = lifetimeSet.ToList(); }
+            _subagentWatcher?.Tailer.PromoteGuessTerminalsToAuthoritative(allIds);
+        }
     }
 
     /// <summary>
@@ -1315,13 +1498,32 @@ public class SessionManager : IDisposable
         _subagentWatcher?.UnregisterSession(sessionId);
         _transcriptTailer?.DeactivateFile(sessionId);
 
-        // Clean up all subagent associations and tails for this session.
+        // Clean up all subagent associations and tails for this session. Use
+        // the per-session lifetime set (which includes subagents whose rows
+        // were already removed by a prior terminal verdict) so terminal memory
+        // is cleared for every subagent this session ever had — not just the
+        // rows still present. This prevents a verdict from leaking into a
+        // future session that reuses the same agent id.
+        List<string>? lifetimeAgentIds = null;
+        if (_sessionSubagentIds.TryGetValue(sessionId, out var lifetimeSet))
+        {
+            lock (lifetimeSet) { lifetimeAgentIds = lifetimeSet.ToList(); }
+        }
         if (_sessions.TryGetValue(sessionId, out var session))
         {
+            // Fall back to the live rows if the lifetime set is empty (e.g. a
+            // session that never registered a subagent association).
             List<string> agentIds;
-            lock (session.SubagentsLock)
+            if (lifetimeAgentIds is { Count: > 0 })
             {
-                agentIds = session.Subagents.Select(s => s.AgentId).ToList();
+                agentIds = lifetimeAgentIds;
+            }
+            else
+            {
+                lock (session.SubagentsLock)
+                {
+                    agentIds = session.Subagents.Select(s => s.AgentId).ToList();
+                }
             }
             foreach (var agentId in agentIds)
             {
@@ -1335,6 +1537,7 @@ public class SessionManager : IDisposable
                     removalTimer.Dispose();
             }
         }
+        _sessionSubagentIds.TryRemove(sessionId, out _);
 
         if (_sessions.TryRemove(sessionId, out session))
         {

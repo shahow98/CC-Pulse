@@ -263,16 +263,44 @@ public class HookServer : IDisposable
 
         if (IsUserActionRequired(message, title, notifType))
         {
+            // A subagent is running — the main agent is waiting on the
+            // subagent, NOT on the user. A permission/input notification
+            // during this window almost certainly belongs to the subagent's
+            // own tooling (subagent tool approval), not a main-agent block.
+            // Do NOT mark main WaitingUser (it would linger after the
+            // subagent finishes, since the post-subagent summary turn's
+            // PreToolUse hooks may be lost and never clear it via
+            // UpdateStatus(Busy)). Do NOT clear the subagent flag either —
+            // a subagent tool approval does not mean the subagent ended.
+            // Just keep the timer alive, same as a background notification.
+            if (_sessionManager.IsSubagentActive(sessionId))
+            {
+                FileLogger.Info(
+                    $"notification (subagent active, ignored) session={sessionId} " +
+                    $"type={notifType} title={title}");
+                _sessionManager.ResetBusyTimeout(sessionId);
+                return;
+            }
+
             _sessionManager.SetSubagentActive(sessionId, false);
             // The agent is blocked on a permission approval / input request —
             // mark it WaitingUser (a fine-grained Idle) so the UI shows
             // "waiting for input…" rather than a plain Idle. The flag is
-            // cleared when the next Busy activity arrives (user approved).
+            // cleared when the next Busy activity arrives (user approved),
+            // or when the transcript observes the main agent resume work
+            // (OnTranscriptToolUse/OnTranscriptAssistantMessage) — the
+            // latter covers the case where the resuming turn's hooks are lost.
             _sessionManager.SetWaitingUser(sessionId);
+            FileLogger.Info(
+                $"notification (waiting user) session={sessionId} " +
+                $"type={notifType} title={title}");
         }
         else
         {
             // Conservatively keep current state; just keep the timer alive.
+            FileLogger.Info(
+                $"notification (background) session={sessionId} " +
+                $"type={notifType} title={title}");
             _sessionManager.ResetBusyTimeout(sessionId);
         }
     }
