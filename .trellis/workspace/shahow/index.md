@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 24
-- **Last Active**: 2026-08-01
+- **Total Sessions**: 25
+- **Last Active**: 2026-08-16
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~804 | Active |
+| `journal-1.md` | ~837 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 25 | 2026-08-16 | Subagent flicker + post-subagent main WaitingUser fixes | `030104b` | `main` |
 | 24 | 2026-08-01 | Hook lifecycle: insert on launch, remove on exit | `d840a5d` | `feat/subagent-watcher` |
 | 23 | 2026-08-01 | Subagent 显示优化：单行两态 working/idle | `2d92c31` | `feat/subagent-watcher` |
 | 22 | 2026-08-01 | Verify subagent display end-to-end and clean up diagnostics | `7648fdb` | `feat/subagent-watcher` |

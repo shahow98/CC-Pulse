@@ -802,3 +802,36 @@ Changed CC-Pulse hook lifecycle so hooks are inserted into ~/.claude/settings.js
 ### Next Steps
 
 - None - task complete
+
+
+## Session 25: Subagent flicker + post-subagent main WaitingUser fixes
+
+**Date**: 2026-08-16
+**Task**: Subagent flicker + post-subagent main WaitingUser fixes
+**Branch**: `main`
+
+### Summary
+
+Reviewed and committed two pending plans from .claude/plans/. subagent-flicker-fix: replaced unreliable 40s silence→Completed guess with authoritative terminal signals from main transcript (<task-notification> per-agent, agents_killed session-level); SubagentTailer now distinguishes authoritative vs guess verdicts (TerminalVerdict struct), escape hatch recovers only guess verdicts with [Request interrupted by user] content guard, silence threshold raised 40s→120s. main-waitinguser-after-subagent-fix: HandleNotification short-circuits when subagent active (notification belongs to subagent tooling, not main block); OnTranscriptToolUse AND OnTranscriptAssistantMessage clear stale IsWaitingUser when main resumes via transcript. Found and fixed one deviation: OnTranscriptAssistantMessage was missing the IsWaitingUser clear required by plan 2 change 2. Compile verified 0 CS errors (build failures were only the running ClaudeMonitor.exe locking bin output).
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `030104b` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
